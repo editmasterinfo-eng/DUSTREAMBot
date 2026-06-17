@@ -3,14 +3,15 @@ import os
 import urllib.parse
 import time
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram import StopPropagation
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import pyrebase
+from info import ADMINS
 
 # ==========================================
 # ⚙️ 1. CONFIGURATION
 # ==========================================
 SOURCE_CHANNEL = -1003897025049  
-ADMINS = [8692160077]  # 🔥 Aapki Admin ID fix kar di gayi hai
 STREAM_URL = "https://dustreambot.onrender.com"
 
 firebaseConfig = {
@@ -28,13 +29,16 @@ firebase = pyrebase.initialize_app(firebaseConfig)
 db = firebase.database()
 user_session = {}
 
-# ==========================================
-# 🛠️ 2. STREAM LINK GENERATOR
-# ==========================================
+def get_name(data):
+    if not data: return "Unnamed"
+    if isinstance(data, dict): return data.get("title") or data.get("name") or "Unnamed"
+    return "Unnamed"
+
 def get_file_name_robust(message):
     if message.document and message.document.file_name: return message.document.file_name
     if message.video and message.video.file_name: return message.video.file_name
     if message.audio and message.audio.file_name: return message.audio.file_name
+    if message.caption: return message.caption[:30]
     return "Unknown_File"
 
 def get_stream_url(msg):
@@ -45,101 +49,196 @@ def get_stream_url(msg):
     return direct_link, clean_name
 
 # ==========================================
-# 🛡️ 3. SMART CUSTOM FILTERS
+# 🛡️ 2. VIP TRACK FILTERS
 # ==========================================
-async def check_name_state(_, __, m):
-    return bool(m.from_user and user_session.get(m.from_user.id, {}).get("state") == "waiting_for_name")
+async def check_state(_, __, m):
+    state = user_session.get(m.from_user.id, {}).get("state", "")
+    return bool(state in ["waiting_batch_name", "waiting_mod_name"])
 
-async def check_first_file(_, __, m):
-    return bool(m.from_user and user_session.get(m.from_user.id, {}).get("state") == "waiting_for_first_file")
+async def check_files(_, __, m):
+    state = user_session.get(m.from_user.id, {}).get("state", "")
+    return bool(state in ["waiting_first_file", "waiting_last_file"])
 
-async def check_last_file(_, __, m):
-    return bool(m.from_user and user_session.get(m.from_user.id, {}).get("state") == "waiting_for_last_file")
-
-name_state_filter = filters.create(check_name_state)
-first_file_filter = filters.create(check_first_file)
-last_file_filter = filters.create(check_last_file)
+state_filter = filters.create(check_state)
+file_filter = filters.create(check_files)
 
 # ==========================================
-# 🤖 4. THE MAGIC COMMANDS (GROUP=1 VIP TRACK)
+# 🤖 3. THE /new UI (GROUP=-1 VIP TRACK)
 # ==========================================
-# 🔥 Note: Har line me "group=1" laga diya hai taaki purana bot isko rok na sake!
+@Client.on_message(filters.command("new") & filters.private & filters.user(ADMINS), group=-1)
+async def new_cmd(client, message: Message):
+    user_session[message.from_user.id] = {"state": "selecting_cat"}
+    try:
+        cats = db.child("categories").get().val()
+        buttons = []
+        if cats:
+            for k, v in cats.items():
+                if v: buttons.append([InlineKeyboardButton(f"📂 {get_name(v)}", callback_data=f"fbcat_{k}")])
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")])
+        await message.reply_text("🔥 **Auto-Bulk Sync Started!**\n\n**Step 1:** Select a Category from Firebase:", reply_markup=InlineKeyboardMarkup(buttons))
+    except Exception as e:
+        await message.reply_text(f"Database Error: {e}")
+    raise StopPropagation
 
-@Client.on_message(filters.command("new") & filters.private & filters.user(ADMINS), group=1)
-async def new_batch_cmd(client, message: Message):
-    user_session[message.from_user.id] = {"state": "waiting_for_name"}
-    await message.reply_text("📝 **Step 1:** Please send the **Name of the Batch/Module** you want to create (e.g., *Editing Mastery 2.0*).")
+@Client.on_callback_query(filters.regex("^fbcancel"), group=-1)
+async def cancel_cb(client, query):
+    user_session[query.from_user.id] = {"state": "idle"}
+    await query.message.edit_text("🚫 **Process Cancelled.**")
+    raise StopPropagation
 
-@Client.on_message(filters.command("cancel_fb") & filters.private & filters.user(ADMINS), group=1)
-async def cancel_cmd(client, message: Message):
-    user_session[message.from_user.id] = {"state": "idle"}
-    await message.reply_text("🚫 **Process Cancelled!** Send `/new` to start again.")
+@Client.on_callback_query(filters.regex("^fbcat_"), group=-1)
+async def sel_cat(client, query):
+    cat_id = query.data.split("_")[1]
+    user_session[query.from_user.id].update({"cat_id": cat_id, "state": "selecting_batch"})
+    try:
+        batches = db.child("categories").child(cat_id).child("batches").get().val()
+        buttons = []
+        if batches:
+            for k, v in batches.items():
+                if v: buttons.append([InlineKeyboardButton(f"🎬 {get_name(v)}", callback_data=f"fbbatch_{k}")])
+        buttons.append([InlineKeyboardButton("➕ Create New Batch", callback_data="fbnewbatch")])
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")])
+        await query.message.edit_text("**Step 2:** Select a Batch or Create New:", reply_markup=InlineKeyboardMarkup(buttons))
+    except: pass
+    raise StopPropagation
 
-@Client.on_message(filters.text & filters.private & name_state_filter, group=1)
-async def text_handler(client, message: Message):
+@Client.on_callback_query(filters.regex("^fbbatch_"), group=-1)
+async def sel_batch(client, query):
+    batch_id = query.data.split("_")[1]
+    user_session[query.from_user.id].update({"batch_id": batch_id, "state": "selecting_mod"})
+    cat_id = user_session[query.from_user.id]["cat_id"]
+    try:
+        mods = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules").get().val()
+        buttons = []
+        if mods:
+            for k, v in mods.items():
+                if v: buttons.append([InlineKeyboardButton(f"📺 {get_name(v)}", callback_data=f"fbmod_{k}")])
+        buttons.append([InlineKeyboardButton("➕ Create New Module", callback_data="fbnewmod")])
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")])
+        await query.message.edit_text("**Step 3:** Select a Module or Create New:", reply_markup=InlineKeyboardMarkup(buttons))
+    except: pass
+    raise StopPropagation
+
+@Client.on_callback_query(filters.regex("^fbnewbatch"), group=-1)
+async def new_batch_btn(client, query):
+    user_session[query.from_user.id]["state"] = "waiting_batch_name"
+    await query.message.edit_text("📝 **Type the name for the NEW BATCH:**")
+    raise StopPropagation
+
+@Client.on_callback_query(filters.regex("^fbnewmod"), group=-1)
+async def new_mod_btn(client, query):
+    user_session[query.from_user.id]["state"] = "waiting_mod_name"
+    await query.message.edit_text("📝 **Type the name for the NEW MODULE:**")
+    raise StopPropagation
+
+@Client.on_callback_query(filters.regex("^fbmod_"), group=-1)
+async def sel_mod(client, query):
+    mod_id = query.data.split("_")[1]
+    user_session[query.from_user.id].update({"mod_id": mod_id, "state": "waiting_first_file"})
+    await query.message.edit_text("✅ **Target Locked!**\n\n📥 **Step 4:** Please **FORWARD** the FIRST FILE of this module from your Main Channel.")
+    raise StopPropagation
+
+# ==========================================
+# ✍️ 4. TEXT HANDLER (CREATE BATCH/MODULE IN DB)
+# ==========================================
+@Client.on_message(filters.text & filters.private & state_filter, group=-1)
+async def handle_names(client, message: Message):
     user_id = message.from_user.id
-    batch_name = message.text.strip()
-    user_session[user_id]["batch_name"] = batch_name
-    user_session[user_id]["state"] = "waiting_for_first_file"
-    await message.reply_text(f"✅ **Batch Name Saved:** `{batch_name}`\n\n📥 **Step 2:** Please **FORWARD** the FIRST FILE of this batch from your Main Channel.")
-
-@Client.on_message((filters.forwarded | filters.media) & filters.private & first_file_filter, group=1)
-async def first_file_handler(client, message: Message):
-    user_id = message.from_user.id
-    msg_id = message.forward_from_message_id if message.forward_from_message_id else message.id
-    user_session[user_id]["start_id"] = msg_id
-    user_session[user_id]["state"] = "waiting_for_last_file"
-    await message.reply_text(f"🎯 **First File Locked (ID: {msg_id})**\n\n📤 **Step 3:** Now **FORWARD** the LAST FILE of this batch.")
-
-@Client.on_message((filters.forwarded | filters.media) & filters.private & last_file_filter, group=1)
-async def last_file_handler(client, message: Message):
-    user_id = message.from_user.id
-    msg_id = message.forward_from_message_id if message.forward_from_message_id else message.id
+    state = user_session[user_id]["state"]
+    text = message.text.strip()
+    cat_id = user_session[user_id]["cat_id"]
     
-    user_session[user_id]["end_id"] = msg_id
-    user_session[user_id]["state"] = "processing"
-    
-    start_id = user_session[user_id]["start_id"]
-    end_id = msg_id
-    batch_name = user_session[user_id]["batch_name"]
-    
-    await message.reply_text(f"🚀 **Target Locked! (From {start_id} to {end_id})**\n\nScanning channel and uploading to Firebase... Please wait.")
-    asyncio.create_task(process_bulk_data(client, message, start_id, end_id, batch_name))
-
-# ==========================================
-# ⚡ 5. THE AUTO-BULK PROCESSOR
-# ==========================================
-async def process_bulk_data(client, message, start_id, end_id, batch_name):
-    if start_id > end_id:
-        start_id, end_id = end_id, start_id
+    if state == "waiting_batch_name":
+        ref = db.child("categories").child(cat_id).child("batches").push({"title": text, "id": ""})
+        batch_id = ref['name']
+        db.child("categories").child(cat_id).child("batches").child(batch_id).update({"id": batch_id})
         
-    status_msg = await message.reply_text("🔄 Fetching files from channel...")
-    total_scanned = videos_added = files_added = 0
-    db_path = db.child("Modules").child(batch_name)
+        user_session[user_id].update({"batch_id": batch_id, "state": "waiting_mod_name"})
+        await message.reply_text(f"✅ Batch `{text}` Created!\n\n📝 **Now type the name for the NEW MODULE inside this batch:**")
+        
+    elif state == "waiting_mod_name":
+        batch_id = user_session[user_id]["batch_id"]
+        ref = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules").push({"name": text, "id": ""})
+        mod_id = ref['name']
+        db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules").child(mod_id).update({"id": mod_id})
+        
+        user_session[user_id].update({"mod_id": mod_id, "state": "waiting_first_file"})
+        await message.reply_text(f"✅ Module `{text}` Created!\n\n📥 **Step 4:** Please **FORWARD** the FIRST FILE of this module from your Main Channel.")
+    
+    raise StopPropagation
+
+# ==========================================
+# 📥 5. FORWARD HANDLER (FIRST & LAST FILE)
+# ==========================================
+@Client.on_message((filters.forwarded | filters.media) & filters.private & file_filter, group=-1)
+async def handle_files(client, message: Message):
+    user_id = message.from_user.id
+    state = user_session[user_id]["state"]
+    msg_id = message.forward_from_message_id if message.forward_from_message_id else message.id
+    
+    if state == "waiting_first_file":
+        user_session[user_id].update({"start_id": msg_id, "state": "waiting_last_file"})
+        await message.reply_text(f"🎯 **First File Locked (ID: {msg_id})**\n\n📤 **Step 5:** Now **FORWARD** the LAST FILE.")
+        
+    elif state == "waiting_last_file":
+        user_session[user_id].update({"end_id": msg_id, "state": "processing"})
+        start_id = user_session[user_id]["start_id"]
+        end_id = msg_id
+        
+        await message.reply_text(f"🚀 **Target Locked! ({start_id} to {end_id})**\n\nScanning channel and uploading structured data to Firebase...")
+        asyncio.create_task(process_bulk_data(client, message, start_id, end_id, user_id))
+        
+    raise StopPropagation
+
+# ==========================================
+# ⚡ 6. THE AUTO-BULK PROCESSOR
+# ==========================================
+async def process_bulk_data(client, message, start_id, end_id, user_id):
+    if start_id > end_id: start_id, end_id = end_id, start_id
+        
+    status_msg = await message.reply_text("🔄 Fetching and organizing files...")
+    
+    cat_id = user_session[user_id]["cat_id"]
+    batch_id = user_session[user_id]["batch_id"]
+    mod_id = user_session[user_id]["mod_id"]
+    
+    db_path = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules").child(mod_id)
+    
+    v_count = f_count = scanned = 0
+    timestamp_base = int(time.time() * 1000)
     
     try:
         for current_id in range(start_id, end_id + 1):
             try:
                 msg = await client.get_messages(SOURCE_CHANNEL, current_id)
-                if msg.empty or not msg.media: continue
+                if msg.empty or not getattr(msg, "media", None): continue
                     
-                total_scanned += 1
+                scanned += 1
                 direct_link, clean_name = get_stream_url(msg)
                 
-                if msg.video: category, videos_added = "videos", videos_added + 1
-                else: category, files_added = "files", files_added + 1
+                # 🔥 APP LOGIC: Video -> Lectures | PDFs/Docs -> Resources
+                target_node = "lectures" if msg.video else "resources"
+                if msg.video: v_count += 1
+                else: f_count += 1
                 
-                payload = {"name": clean_name, "stream_link": direct_link, "msg_id": msg.id, "timestamp": int(time.time()), "type": category}
-                ref = db_path.child(category).push(payload)
-                db_path.child(category).child(ref['name']).update({"id": ref['name']})
+                # EXACT PAYLOAD MATCHING YOUR SCREENSHOT
+                payload = {
+                    "name": clean_name,
+                    "link": direct_link,
+                    "order": timestamp_base + scanned,
+                    "thumbnail": ""
+                }
                 
-                if total_scanned % 5 == 0:
-                    await status_msg.edit_text(f"⏳ **Processing...**\nScanned: {total_scanned}\nVideos Added: {videos_added}\nFiles Added: {files_added}")
+                ref = db_path.child(target_node).push(payload)
+                db_path.child(target_node).child(ref['name']).update({"id": ref['name']})
+                
+                if scanned % 5 == 0:
+                    await status_msg.edit_text(f"⏳ **Processing...**\nScanned: {scanned}\nVideos (Lectures): {v_count}\nFiles (Resources): {f_count}")
             except Exception as e:
-                pass # Silent ignore for deleted messages
+                pass
                 
-        await status_msg.edit_text(f"✅ **BATCH SUCCESSFULLY SYNCED!**\n━━━━━━━━━━━━━━━━━━━━\n📂 **Batch Name:** `{batch_name}`\n🎬 **Videos Added:** {videos_added}\n📑 **Files/PDFs Added:** {files_added}\n\n🔥 *All data saved in Firebase!*")
+        await status_msg.edit_text(f"✅ **BATCH SUCCESSFULLY SYNCED!**\n━━━━━━━━━━━━━━━━━━━━\n🎬 **Lectures (Videos):** {v_count}\n📑 **Resources (Files):** {f_count}\n\n🔥 *All data securely saved to Firebase Realtime Database!*")
     except Exception as e:
         await status_msg.edit_text(f"❌ **Fatal Error:** {e}")
     finally:
-        user_session[message.chat.id] = {"state": "idle"}
+        user_session[user_id] = {"state": "idle"}
