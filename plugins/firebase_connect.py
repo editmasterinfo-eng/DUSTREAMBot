@@ -5,15 +5,14 @@ import time
 from pyrogram import Client, filters
 from pyrogram.types import Message
 import pyrebase
-from info import ADMINS  # 🔥 FIX: Ab ye directly aapke main bot se Admin ID lega!
 
 # ==========================================
 # ⚙️ 1. CONFIGURATION
 # ==========================================
-SOURCE_CHANNEL = -1003911500529  # Jis channel se files uthani hain
+SOURCE_CHANNEL = -1003897025049  
+ADMINS = [8692160077]  # 🔥 Aapki Admin ID fix kar di gayi hai
 STREAM_URL = "https://dustreambot.onrender.com"
 
-# Firebase Config (Aapki keys)
 firebaseConfig = {
     "apiKey": "AIzaSyBhMItJzgDtMmwLesBqs1mUzna3-0WD8Rk",
     "authDomain": "skillneast-669ba.firebaseapp.com",
@@ -27,7 +26,6 @@ firebaseConfig = {
 
 firebase = pyrebase.initialize_app(firebaseConfig)
 db = firebase.database()
-
 user_session = {}
 
 # ==========================================
@@ -63,19 +61,21 @@ first_file_filter = filters.create(check_first_file)
 last_file_filter = filters.create(check_last_file)
 
 # ==========================================
-# 🤖 4. THE MAGIC COMMANDS (/new)
+# 🤖 4. THE MAGIC COMMANDS (GROUP=1 VIP TRACK)
 # ==========================================
-@Client.on_message(filters.command("new") & filters.private & filters.user(ADMINS))
+# 🔥 Note: Har line me "group=1" laga diya hai taaki purana bot isko rok na sake!
+
+@Client.on_message(filters.command("new") & filters.private & filters.user(ADMINS), group=1)
 async def new_batch_cmd(client, message: Message):
     user_session[message.from_user.id] = {"state": "waiting_for_name"}
     await message.reply_text("📝 **Step 1:** Please send the **Name of the Batch/Module** you want to create (e.g., *Editing Mastery 2.0*).")
 
-@Client.on_message(filters.command("cancel_fb") & filters.private & filters.user(ADMINS))
+@Client.on_message(filters.command("cancel_fb") & filters.private & filters.user(ADMINS), group=1)
 async def cancel_cmd(client, message: Message):
     user_session[message.from_user.id] = {"state": "idle"}
     await message.reply_text("🚫 **Process Cancelled!** Send `/new` to start again.")
 
-@Client.on_message(filters.text & filters.private & name_state_filter)
+@Client.on_message(filters.text & filters.private & name_state_filter, group=1)
 async def text_handler(client, message: Message):
     user_id = message.from_user.id
     batch_name = message.text.strip()
@@ -83,7 +83,7 @@ async def text_handler(client, message: Message):
     user_session[user_id]["state"] = "waiting_for_first_file"
     await message.reply_text(f"✅ **Batch Name Saved:** `{batch_name}`\n\n📥 **Step 2:** Please **FORWARD** the FIRST FILE of this batch from your Main Channel.")
 
-@Client.on_message((filters.forwarded | filters.media) & filters.private & first_file_filter)
+@Client.on_message((filters.forwarded | filters.media) & filters.private & first_file_filter, group=1)
 async def first_file_handler(client, message: Message):
     user_id = message.from_user.id
     msg_id = message.forward_from_message_id if message.forward_from_message_id else message.id
@@ -91,7 +91,7 @@ async def first_file_handler(client, message: Message):
     user_session[user_id]["state"] = "waiting_for_last_file"
     await message.reply_text(f"🎯 **First File Locked (ID: {msg_id})**\n\n📤 **Step 3:** Now **FORWARD** the LAST FILE of this batch.")
 
-@Client.on_message((filters.forwarded | filters.media) & filters.private & last_file_filter)
+@Client.on_message((filters.forwarded | filters.media) & filters.private & last_file_filter, group=1)
 async def last_file_handler(client, message: Message):
     user_id = message.from_user.id
     msg_id = message.forward_from_message_id if message.forward_from_message_id else message.id
@@ -136,7 +136,7 @@ async def process_bulk_data(client, message, start_id, end_id, batch_name):
                 if total_scanned % 5 == 0:
                     await status_msg.edit_text(f"⏳ **Processing...**\nScanned: {total_scanned}\nVideos Added: {videos_added}\nFiles Added: {files_added}")
             except Exception as e:
-                print(f"Skipping ID {current_id}: {e}")
+                pass # Silent ignore for deleted messages
                 
         await status_msg.edit_text(f"✅ **BATCH SUCCESSFULLY SYNCED!**\n━━━━━━━━━━━━━━━━━━━━\n📂 **Batch Name:** `{batch_name}`\n🎬 **Videos Added:** {videos_added}\n📑 **Files/PDFs Added:** {files_added}\n\n🔥 *All data saved in Firebase!*")
     except Exception as e:
