@@ -20,7 +20,7 @@ ADMIN_TXT = environ.get('ADMIN', '8692160077')
 try:
     ADMIN = int(ADMIN_TXT.split()[0])
 except:
-    ADMIN = 1865244712 # Fallback if error
+    ADMIN = 8692160077 # Fallback if error
 
 # 2. ADMINS: Ye new Firebase plugin ke liye hai (List of IDs)
 ADMINS = [int(x) for x in ADMIN_TXT.split()]
