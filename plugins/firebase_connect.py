@@ -13,7 +13,7 @@ from info import ADMINS
 # ⚙️ 1. CONFIGURATION
 # ==========================================
 SOURCE_CHANNEL = -1003897025049  
-STREAM_URL = "https://dustreambot.onrender.com"
+STREAM_URL = "https://dustreambot.onrender.com"  # ✅ Fixed Domain
 
 firebaseConfig = {
     "apiKey": "AIzaSyBhMItJzgDtMmwLesBqs1mUzna3-0WD8Rk",
@@ -31,7 +31,7 @@ db = firebase.database()
 user_session = {}
 
 # ==========================================
-# 🛠️ 2. HELPERS & GENERATORS
+# 🛠️ 2. HELPERS & THREAD-SAFE FIREBASE LOGIC
 # ==========================================
 def get_name(data):
     if not data: return "Unnamed"
@@ -50,7 +50,8 @@ def get_stream_url(msg):
     file_name = get_file_name_robust(msg)
     clean_name = file_name.replace("_", " ").replace("-", " ")
     safe_filename = urllib.parse.quote_plus(file_name)
-    direct_link = f"{STREAM_URL}/dl/{msg.id}/{safe_filename}"
+    # 🔥 FIX: Removed '/dl/' to prevent 404 error in DUSTREAMBot
+    direct_link = f"{STREAM_URL}/{msg.id}/{safe_filename}"
     return direct_link, clean_name
 
 def extract_module_name(caption):
@@ -61,23 +62,21 @@ def extract_module_name(caption):
         path = match.group(1).strip()
         parts = [p.strip() for p in path.split('/') if p.strip()]
         if len(parts) > 0:
-            return parts[-1]  # The subfolder name
+            return parts[-1]
     return "Main Module"
 
-# Background Firebase Updaters (To prevent bot from freezing)
-def fb_create_module(base_db_path, mod_name):
-    ref = base_db_path.push({"name": mod_name, "id": ""})
+# 🔥 FIX: THREAD-SAFE FIREBASE FUNCTIONS (Prevents Root Dumping)
+def fb_create_module(cat_id, batch_id, mod_name):
+    path = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules")
+    ref = path.push({"name": mod_name, "id": ""})
     mod_id = ref['name']
-    base_db_path.child(mod_id).update({"id": mod_id})
+    path.child(mod_id).update({"id": mod_id})
     return mod_id
 
-def fb_push_file(base_db_path, mod_id, target_node, payload):
-    file_ref = base_db_path.child(mod_id).child(target_node).push(payload)
-    base_db_path.child(mod_id).child(target_node).child(file_ref['name']).update({"id": file_ref['name']})
-
-def fb_push_file_manual(db_path, target_node, payload):
-    ref = db_path.child(target_node).push(payload)
-    db_path.child(target_node).child(ref['name']).update({"id": ref['name']})
+def fb_push_file(cat_id, batch_id, mod_id, target_node, payload):
+    path = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules").child(mod_id).child(target_node)
+    file_ref = path.push(payload)
+    path.child(file_ref['name']).update({"id": file_ref['name']})
 
 # ==========================================
 # 🛡️ 3. VIP TRACK FILTERS
@@ -208,12 +207,7 @@ async def handle_names(client, message: Message):
         
     elif state == "waiting_mod_name":
         cat_id, batch_id = user_session[user_id]["cat_id"], user_session[user_id]["batch_id"]
-        def create_mod():
-            ref = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules").push({"name": text, "id": ""})
-            mod_id = ref['name']
-            db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules").child(mod_id).update({"id": mod_id})
-            return mod_id
-        mod_id = await asyncio.to_thread(create_mod)
+        mod_id = await asyncio.to_thread(fb_create_module, cat_id, batch_id, text)
         user_session[user_id].update({"mod_id": mod_id, "state": "waiting_first_file_manual"})
         await message.reply_text(f"✅ Module `{text}` Created!\n\n📥 **Please FORWARD the FIRST FILE of this module.**")
     
@@ -227,6 +221,11 @@ async def handle_files(client, message: Message):
     user_id = message.from_user.id
     state = user_session[user_id]["state"]
     msg_id = message.forward_from_message_id if message.forward_from_message_id else message.id
+
+    if message.forward_from_chat:
+        user_session[user_id]["source_chat"] = message.forward_from_chat.id
+    else:
+        user_session[user_id]["source_chat"] = SOURCE_CHANNEL
 
     if state == "waiting_first_file_auto":
         user_session[user_id].update({"start_id": msg_id, "state": "waiting_last_file_auto"})
@@ -254,7 +253,7 @@ async def handle_files(client, message: Message):
 async def process_bulk_auto(client, message, user_id):
     start_id = user_session[user_id]["start_id"]
     end_id = user_session[user_id]["end_id"]
-    source_chat = SOURCE_CHANNEL # Always strictly use source channel
+    source_chat = user_session[user_id]["source_chat"]
     
     if start_id > end_id: start_id, end_id = end_id, start_id
     total_files = (end_id - start_id) + 1
@@ -262,123 +261,91 @@ async def process_bulk_auto(client, message, user_id):
     status_msg = await message.reply_text("🔄 **Starting Deep Live Scan...**")
     cat_id, batch_id = user_session[user_id]["cat_id"], user_session[user_id]["batch_id"]
     
-    base_db_path = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules")
-    
     module_cache = {}
     v_count = f_count = failed_count = scanned = 0
     failed_logs = []
     timestamp_base = int(time.time() * 1000)
     last_update_time = time.time()
     
-    # 🔥 FIX: Strict Video Extensions Check (No Images allowed in Lectures!)
     video_exts = ['.mp4', '.mkv', '.avi', '.webm', '.mov', '.flv', '.wmv', '.m4v']
-    
     all_ids = list(range(start_id, end_id + 1))
     
     try:
-        # Fetching in smaller safer chunks to prevent Telegram timeouts
         for i in range(0, len(all_ids), 20):
             chunk_ids = all_ids[i:i + 20]
             try:
                 messages = await client.get_messages(source_chat, chunk_ids)
             except Exception as e:
                 failed_count += len(chunk_ids)
-                failed_logs.append(f"Channel Read Error: {str(e)[:25]}")
+                failed_logs.append(f"Channel Error: {str(e)[:30]}")
                 continue
                 
             for msg in messages:
                 scanned += 1
-                
-                if msg.empty or not getattr(msg, "media", None):
-                    # Silently skip deleted or pure text messages
-                    continue
+                if msg.empty or not getattr(msg, "media", None): continue
                 
                 try:
                     direct_link, clean_name = get_stream_url(msg)
                     mod_name = extract_module_name(msg.caption)
                     
                     if mod_name not in module_cache:
-                        # Threaded network call to prevent freezing
-                        mod_id = await asyncio.to_thread(fb_create_module, base_db_path, mod_name)
+                        mod_id = await asyncio.to_thread(fb_create_module, cat_id, batch_id, mod_name)
                         module_cache[mod_name] = mod_id
                     
                     mod_id = module_cache[mod_name]
                     
-                    # 🔥 FIX: Checking Extension precisely
                     file_name_lower = get_file_name_robust(msg).lower()
                     is_video = False
-                    if getattr(msg, "video", None): 
-                        is_video = True
-                    elif any(file_name_lower.endswith(ext) for ext in video_exts): 
-                        is_video = True
-                    # Note: If it's a Photo/Image, 'is_video' remains False.
+                    if getattr(msg, "video", None): is_video = True
+                    elif any(file_name_lower.endswith(ext) for ext in video_exts): is_video = True
                     
                     target_node = "lectures" if is_video else "resources"
-                    
                     if is_video: v_count += 1
                     else: f_count += 1
                     
                     payload = {"name": clean_name, "link": direct_link, "order": timestamp_base + scanned, "thumbnail": ""}
-                    
-                    # Threaded network call to prevent freezing
-                    await asyncio.to_thread(fb_push_file, base_db_path, mod_id, target_node, payload)
+                    await asyncio.to_thread(fb_push_file, cat_id, batch_id, mod_id, target_node, payload)
                     
                 except Exception as ex:
                     failed_count += 1
                     failed_logs.append(f"ID {msg.id}: Sync Error")
 
-                # 🔥 LIVE DASHBOARD UPDATE (Every 2.5 seconds to avoid flood limit)
                 now = time.time()
                 if now - last_update_time > 2.5:
                     ui = (
-                        f"⚡ **LIVE SYNC DASHBOARD**\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"⚡ **LIVE SYNC DASHBOARD**\n━━━━━━━━━━━━━━━━━━━━\n"
                         f"📊 **Progress:** {scanned} / {total_files} Scanned\n"
-                        f"⏳ **Remaining:** {total_files - scanned} files\n\n"
-                        f"📂 **Current Module:** `{mod_name}`\n"
-                        f"📄 **Processing:** `{clean_name[:20]}...`\n\n"
-                        f"✅ **Successfully Added:** {v_count + f_count}\n"
-                        f"   ├ 🎬 Videos (Lectures): {v_count}\n"
-                        f"   └ 📑 Files (Resources): {f_count}\n"
-                        f"❌ **Skipped / Failed:** {failed_count}\n"
+                        f"📂 **Module:** `{mod_name}`\n"
+                        f"📄 **File:** `{clean_name[:20]}...`\n\n"
+                        f"✅ **Added:** {v_count + f_count} (🎬 {v_count} | 📑 {f_count})\n"
+                        f"❌ **Failed:** {failed_count}"
                     )
-                    if failed_logs:
-                        ui += f"\n⚠️ **Recent Logs:**\n" + "\n".join([f"• {err}" for err in failed_logs[-3:]])
-                        
-                    try:
-                        await status_msg.edit_text(ui)
-                        last_update_time = now
+                    try: await status_msg.edit_text(ui); last_update_time = now
                     except: pass
                     
-        # FINAL SUMMARY
         final_ui = (
-            f"✅ **SMART BATCH SYNC COMPLETE!**\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ **SMART BATCH SYNC COMPLETE!**\n━━━━━━━━━━━━━━━━━━━━\n"
             f"📂 **Modules Auto-Created:** {len(module_cache)}\n"
             f"🎬 **Videos (Lectures):** {v_count}\n"
-            f"📑 **Files/Images (Resources):** {f_count}\n"
-            f"❌ **Total Skipped/Failed:** {failed_count}\n\n"
-            f"🔥 *All data securely saved and structured into Firebase!*"
+            f"📑 **Files (Resources):** {f_count}\n"
+            f"❌ **Total Skipped/Failed:** {failed_count}\n\n🔥 *Strictly Organized in Firebase!*"
         )
         await status_msg.edit_text(final_ui)
         
-    except Exception as e:
-        await status_msg.edit_text(f"❌ **Fatal Error:** {e}")
-    finally:
-        user_session[user_id] = {"state": "idle"}
+    except Exception as e: await status_msg.edit_text(f"❌ **Fatal Error:** {e}")
+    finally: user_session[user_id] = {"state": "idle"}
 
 # ==========================================
-# ⚡ 8. MANUAL PROCESSOR (For single modules)
+# ⚡ 8. MANUAL PROCESSOR
 # ==========================================
 async def process_bulk_manual(client, message, user_id):
     start_id, end_id = user_session[user_id]["start_id"], user_session[user_id]["end_id"]
-    source_chat = SOURCE_CHANNEL
+    source_chat = user_session[user_id]["source_chat"]
     if start_id > end_id: start_id, end_id = end_id, start_id
     total_files = (end_id - start_id) + 1
     
     status_msg = await message.reply_text("🔄 **Initializing Live Dashboard...**")
     cat_id, batch_id, mod_id = user_session[user_id]["cat_id"], user_session[user_id]["batch_id"], user_session[user_id]["mod_id"]
-    db_path = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules").child(mod_id)
     
     v_count = f_count = failed_count = scanned = 0
     timestamp_base = int(time.time() * 1000)
@@ -391,9 +358,7 @@ async def process_bulk_manual(client, message, user_id):
         for i in range(0, len(all_ids), 20):
             chunk_ids = all_ids[i:i + 20]
             try: messages = await client.get_messages(source_chat, chunk_ids)
-            except Exception:
-                failed_count += len(chunk_ids)
-                continue
+            except: continue
                 
             for msg in messages:
                 scanned += 1
@@ -401,7 +366,6 @@ async def process_bulk_manual(client, message, user_id):
                 
                 try:
                     direct_link, clean_name = get_stream_url(msg)
-                    
                     file_name_lower = get_file_name_robust(msg).lower()
                     is_video = False
                     if getattr(msg, "video", None): is_video = True
@@ -412,24 +376,15 @@ async def process_bulk_manual(client, message, user_id):
                     else: f_count += 1
                     
                     payload = {"name": clean_name, "link": direct_link, "order": timestamp_base + scanned, "thumbnail": ""}
-                    await asyncio.to_thread(fb_push_file_manual, db_path, target_node, payload)
-                    
-                except Exception as ex:
-                    failed_count += 1
+                    await asyncio.to_thread(fb_push_file, cat_id, batch_id, mod_id, target_node, payload)
+                except: failed_count += 1
 
                 now = time.time()
                 if now - last_update_time > 2.5:
-                    ui = (
-                        f"⚡ **MANUAL SYNC DASHBOARD**\n"
-                        f"━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📊 **Progress:** {scanned} / {total_files} Scanned\n"
-                        f"📄 **Processing:** `{clean_name[:20]}...`\n\n"
-                        f"✅ **Added Successfully:** {v_count + f_count} (🎬 {v_count} | 📑 {f_count})\n"
-                        f"❌ **Failed:** {failed_count}"
-                    )
+                    ui = f"⚡ **MANUAL SYNC ({scanned}/{total_files})**\n━━━━━━━━━━━━━━━━━━━━\n📄 `{clean_name[:25]}...`\n✅ Added: {v_count + f_count} (🎬 {v_count} | 📑 {f_count}) | ❌ Failed: {failed_count}"
                     try: await status_msg.edit_text(ui); last_update_time = now
                     except: pass
                     
-        await status_msg.edit_text(f"✅ **MANUAL SYNC COMPLETE!**\n🎬 Videos: {v_count} | 📑 Files: {f_count} | ❌ Skipped/Failed: {failed_count}")
+        await status_msg.edit_text(f"✅ **MANUAL SYNC COMPLETE!**\n🎬 Videos: {v_count} | 📑 Files: {f_count} | ❌ Failed: {failed_count}")
     except Exception as e: await status_msg.edit_text(f"❌ Error: {e}")
     finally: user_session[user_id] = {"state": "idle"}
