@@ -12,7 +12,7 @@ from info import ADMINS
 # ⚙️ 1. CONFIGURATION
 # ==========================================
 SOURCE_CHANNEL = -1003897025049  
-STREAM_URL = "https://skillneaststream.onrender.com"
+STREAM_URL = "https://dustreambot.onrender.com"
 
 firebaseConfig = {
     "apiKey": "AIzaSyBhMItJzgDtMmwLesBqs1mUzna3-0WD8Rk",
