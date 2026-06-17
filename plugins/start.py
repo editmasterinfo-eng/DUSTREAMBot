@@ -32,11 +32,11 @@ async def get_stream_url(client, message_id, file_name_override=None):
         clean_name = file_name.replace("_", " ")
         
         # 2. URL Safe Name
-        # Link me daalne ke liye original extension aur safe characters chahiye
         safe_filename = urllib.parse.quote_plus(file_name)
         
-        # 3. Direct Link (/dl/ format)
-        direct_link = f"{STREAM_URL}/dl/{message_id}/{safe_filename}"
+        # 🔥 FIX: Direct Link me Double slashes block
+        base_url = STREAM_URL.rstrip('/')
+        direct_link = f"{base_url}/dl/{message_id}/{safe_filename}"
         
         return direct_link, clean_name
             
@@ -130,9 +130,10 @@ async def universal_handler(client, message):
     if not direct_link:
         return await message.reply("Error generating link.")
 
-    # Generate Website Link (Old Logic Preserved)
+    # Generate Website Link (Fix for double slash here too)
     params = {'u': message.from_user.id, 'w': str(log_msg.id), 's': str(0), 't': str(0)}
-    website_url = f"{LINK_URL}?Tech_VJ={await encode(urlencode(params))}"
+    base_link_url = LINK_URL.rstrip('/')
+    website_url = f"{base_link_url}?Tech_VJ={await encode(urlencode(params))}"
     
     # Reply Text
     text = (
