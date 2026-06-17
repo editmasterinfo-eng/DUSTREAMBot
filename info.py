@@ -30,7 +30,7 @@ ADMINS = [int(x) for x in ADMIN_TXT.split()]
 BACKUP_BOT_TOKEN = environ.get('BACKUP_BOT_TOKEN', "")
 
 # Log Channel
-LOG_CHANNEL = int(environ.get('LOG_CHANNEL', '-1002869695930'))
+LOG_CHANNEL = int(environ.get('LOG_CHANNEL', '-1003911500529'))
 
 # Mongodb Database
 MONGODB_URI = environ.get("MONGODB_URI", "")
