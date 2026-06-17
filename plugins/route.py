@@ -97,22 +97,16 @@ html_content = """
 async def root_route_handler(request):
     return web.Response(text=html_content, content_type='text/html')
 
-# --- NEW ROTATION ROUTE ADDED HERE (FIX FOR 404) ---
 @routes.get("/stream/{message_id}")
 async def stream_handler_rotation(request):
     try:
-        # 1. URL se Message ID nikalo (e.g. 1054)
         message_id = int(request.match_info['message_id'])
-        
-        # 2. Media Streamer ko call karo (Secure Hash khali rakha hai)
         return await media_streamer(request, message_id, "")
-        
     except ValueError:
         return web.Response(status=400, text="Invalid Message ID (Must be a number)")
     except Exception as e:
         logging.error(f"Stream Error: {e}")
         return web.Response(status=500, text="Server Error")
-# ---------------------------------------------------
 
 @routes.get(r"/{path}/{user_path}/{second}/{third}", allow_head=True)
 async def stream_handler(request: web.Request):
@@ -133,8 +127,8 @@ async def stream_handler(request: web.Request):
 @routes.post('/click-counter')
 async def handle_click(request):
     try:
-        data = await request.json()  # Get the JSON body
-        user_id = int(data.get('user_id'))  # Extract user_id from the request
+        data = await request.json()
+        user_id = int(data.get('user_id'))
         today = datetime.now().strftime('%Y-%m-%d')
 
         user_agent = request.headers.get('User-Agent')
@@ -166,8 +160,9 @@ async def get_original(request: web.Request):
     short_link = request.match_info["short_link"]
     original = await decode(short_link)
     if original:
-        link = f"{STREAM_URL}link?{original}"
-        raise web.HTTPFound(link)  # Redirect to the constructed link 
+        base_url = STREAM_URL.rstrip('/')
+        link = f"{base_url}/link?{original}"
+        raise web.HTTPFound(link)
     else:
         return web.Response(text=html_content, content_type='text/html')
 
@@ -181,10 +176,12 @@ async def visits(request: web.Request):
     user_id = await encode(user)
     sec_id = await encode(second)
     th_id = await encode(third)
-    link = f"{STREAM_URL}{data}/{user_id}/{sec_id}/{th_id}"
-    raise web.HTTPFound(link)  # Redirect to the constructed link
+    base_url = STREAM_URL.rstrip('/')
+    link = f"{base_url}/{data}/{user_id}/{sec_id}/{th_id}"
+    raise web.HTTPFound(link)
 
-@routes.get(r"/dl/{path:\S+}", allow_head=True)
+# 🔥 FIX: \S+ Changed to .+ to support spaces & safe regex logic added
+@routes.get(r"/dl/{path:.+}", allow_head=True)
 async def stream_handler_legacy(request: web.Request):
     try:
         path = request.match_info["path"]
@@ -193,7 +190,7 @@ async def stream_handler_legacy(request: web.Request):
             secure_hash = match.group(1)
             id = int(match.group(2))
         else:
-            id = int(re.search(r"(\d+)(?:\/\S+)?", path).group(1))
+            id = int(re.search(r"^(\d+)", path).group(1))
             secure_hash = request.rel_url.query.get("hash")
         return await media_streamer(request, id, secure_hash)
     except InvalidHash as e:
@@ -226,7 +223,6 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
         class_cache[faster_client] = tg_connect
     logging.debug("before calling get_file_properties")
     
-    # --- IMPORTANT: This function expects 'id' to be a MESSAGE ID (Integer) ---
     file_id = await tg_connect.get_file_properties(id)
     logging.debug("after calling get_file_properties")
     
