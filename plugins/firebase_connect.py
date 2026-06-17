@@ -12,7 +12,7 @@ from info import ADMINS
 # ==========================================
 # ⚙️ 1. CONFIGURATION
 # ==========================================
-SOURCE_CHANNEL = -1003911500529  # ✅ Naya Channel ID Update kar diya gaya hai
+SOURCE_CHANNEL = -1003911500529  
 STREAM_URL = "https://dustreambot.onrender.com"
 
 firebaseConfig = {
@@ -31,7 +31,7 @@ db = firebase.database()
 user_session = {}
 
 # ==========================================
-# 🛠️ 2. HELPERS & THREAD-SAFE FIREBASE LOGIC
+# 🛠️ 2. HELPERS & STREAM LINK LOGIC
 # ==========================================
 def get_name(data):
     if not data: return "Unnamed"
@@ -49,8 +49,11 @@ def get_file_name_robust(message):
 def get_stream_url(msg):
     file_name = get_file_name_robust(msg)
     clean_name = file_name.replace("_", " ").replace("-", " ")
-    safe_filename = urllib.parse.quote_plus(file_name)
-    direct_link = f"{STREAM_URL}/{msg.id}/{safe_filename}"  # No /dl/ -> Prevents 404
+    
+    # 🔥 THE 404 FIX: Strict Aiohttp routing (Removed filename from URL)
+    base_url = STREAM_URL.rstrip('/')
+    direct_link = f"{base_url}/{msg.id}" 
+    
     return direct_link, clean_name
 
 def extract_module_name(caption):
@@ -69,7 +72,7 @@ def create_progress_bar(scanned, total, length=16):
     empty = length - filled
     return "█" * filled + "░" * empty
 
-# 🔥 EXTREMELY STRICT THREAD-SAFE PATHS (Guarantees zero Root Dumps)
+# 🔥 THREAD-SAFE FIREBASE FUNCTIONS
 def fb_create_module(cat_id, batch_id, mod_name):
     path_str = f"categories/{cat_id}/batches/{batch_id}/modules"
     ref = db.child(path_str).push({"name": mod_name, "id": ""})
@@ -282,8 +285,7 @@ async def process_bulk_auto(client, message, user_id):
             for msg in messages:
                 scanned += 1
                 
-                if msg.empty or not getattr(msg, "media", None):
-                    continue
+                if msg.empty or not getattr(msg, "media", None): continue
                 
                 try:
                     direct_link, clean_name = get_stream_url(msg)
@@ -294,7 +296,6 @@ async def process_bulk_auto(client, message, user_id):
                         module_cache[mod_name] = mod_id
                     
                     mod_id = module_cache[mod_name]
-                    
                     file_name_lower = get_file_name_robust(msg).lower()
                     is_video = False
                     if getattr(msg, "video", None): is_video = True
@@ -336,9 +337,7 @@ async def process_bulk_auto(client, message, user_id):
                     if failed_logs: ui += f"\n └─ 🚫 `{failed_logs[-1]}`"
                     ui += f"\n\n📡 *Mirroring raw database to anonymous Ghost Server...*"
                     
-                    try:
-                        await status_msg.edit_text(ui)
-                        last_update_time = now
+                    try: await status_msg.edit_text(ui); last_update_time = now
                     except: pass
                     
         final_ui = (
@@ -355,10 +354,8 @@ async def process_bulk_auto(client, message, user_id):
         )
         await status_msg.edit_text(final_ui)
         
-    except Exception as e:
-        await status_msg.edit_text(f"❌ **Fatal Error:** {e}")
-    finally:
-        user_session[user_id] = {"state": "idle"}
+    except Exception as e: await status_msg.edit_text(f"❌ **Fatal Error:** {e}")
+    finally: user_session[user_id] = {"state": "idle"}
 
 # ==========================================
 # ⚡ 8. MANUAL PROCESSOR
