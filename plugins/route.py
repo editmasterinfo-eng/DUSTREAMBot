@@ -1,175 +1,165 @@
-# Don't Remove Credit @VJ_Botz
-import re, math, logging, secrets, mimetypes, time
-from info import *
-from aiohttp import web
-from aiohttp.http_exceptions import BadStatusLine
-from plugins.start import decode, encode 
-from datetime import datetime
-from plugins.database import record_visit, get_count
-from TechVJ.bot import multi_clients, work_loads, TechVJBot
-from TechVJ.server.exceptions import FIleNotFound, InvalidHash
-from TechVJ import StartTime, __version__
-from TechVJ.util.custom_dl import ByteStreamer
-from TechVJ.util.time_format import get_readable_time
-from TechVJ.util.render_template import render_page
-from TechVJ.util.file_properties import get_file_ids
+import os
+import urllib.parse
+import base64
+import binascii
+from pyrogram import Client, filters, enums
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from info import LOG_CHANNEL, LINK_URL, ADMINS, STREAM_URL
+from Script import script
+from plugins.database import checkdb, db, get_count, get_withdraw, record_withdraw
 
-routes = web.RouteTableDef()
+# --- Helper Functions ---
 
-html_content = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Welcome to VJ Disk</title>
-    <style>
-        body { margin: 0; font-family: 'Arial', sans-serif; background: linear-gradient(135deg, #ff7e5f, #feb47b); color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; text-align: center; }
-        h1 { font-size: 4em; text-shadow: 2px 2px 10px rgba(0,0,0,0.5); }
-        p { font-size: 1.5em; margin-top: 20px; }
-        .button { margin-top: 30px; padding: 15px 30px; font-size: 1.2em; background-color: #4CAF50; border: none; border-radius: 5px; color: white; cursor: pointer; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Welcome To VJ Disk!</h1><p>Your ultimate destination for streaming!</p>
-    </div>
-</body>
-</html>
-"""
+def get_file_name_robust(message):
+    if message.caption:
+        return message.caption 
+    if message.document and getattr(message.document, 'file_name', None):
+        return message.document.file_name
+    if message.video and getattr(message.video, 'file_name', None):
+        return message.video.file_name
+    if message.audio and getattr(message.audio, 'file_name', None):
+        return message.audio.file_name
+    return "Unknown_File"
 
-@routes.get("/", allow_head=True)
-async def root_route_handler(request):
-    return web.Response(text=html_content, content_type='text/html')
-
-@routes.post('/click-counter')
-async def handle_click(request):
+async def get_stream_url(client, message_id, file_name_override=None):
     try:
-        data = await request.json()
-        user_id = int(data.get('user_id'))
-        today = datetime.now().strftime('%Y-%m-%d')
-        user_agent = request.headers.get('User-Agent')
-        if "Chrome" in user_agent or "Google Inc" in user_agent:
-            if request.cookies.get('visited') == today: return
-            response = web.Response(text="Hello, World!")
-            response.set_cookie('visited', today, max_age=24*60*60)
-            u = get_count(user_id)
-            record_visit(user_id, int(u + 1) if u else 1)
-            return response
-    except: pass
-
-@routes.get('/link', allow_head=True)
-async def visits(request: web.Request):
-    user, watch, second, third = request.query.get('u'), request.query.get('w'), request.query.get('s'), request.query.get('t')
-    data, user_id, sec_id, th_id = await encode(watch), await encode(user), await encode(second), await encode(third)
-    base_url = STREAM_URL.rstrip('/')
-    raise web.HTTPFound(f"{base_url}/{data}/{user_id}/{sec_id}/{th_id}")
-
-# 🔥 SMART DOWNLOAD ROUTE (Traps 404 Errors & Fixes Spaces)
-@routes.get(r"/dl/{path:.+}", allow_head=True)
-async def stream_handler_legacy(request: web.Request):
-    try:
-        path = request.match_info["path"]
-        match = re.search(r"^([a-zA-Z0-9_-]{6})(\d+)$", path)
-        if match:
-            secure_hash = match.group(1)
-            id = int(match.group(2))
-        else:
-            id_match = re.search(r"^(\d+)", path)
-            if id_match:
-                id = int(id_match.group(1))
-            else:
-                return web.Response(status=404, text="<h1>404 Error</h1><p>Invalid Video Link Format.</p>", content_type="text/html")
-            secure_hash = request.rel_url.query.get("hash", "")
-            
-        return await media_streamer(request, id, secure_hash)
+        msg = await client.get_messages(LOG_CHANNEL, message_id)
+        file_name = file_name_override if file_name_override else get_file_name_robust(msg)
         
-    except InvalidHash as e:
-        return web.Response(status=403, text=f"<h1>403 Forbidden</h1><p>{e.message}</p>", content_type="text/html")
-    except FIleNotFound as e:
-        # 🔥 SMART ERROR: Ab blank page nahi aayega! Ye screen par problem batayega.
-        html_error = f"""
-        <div style='font-family: Arial; padding: 20px;'>
-            <h1 style='color: red;'>Telegram File Missing (404)</h1>
-            <p>The Bot cannot access the video file in your Telegram Log Channel.</p>
-            <p><b>Reason:</b> {e.message}</p>
-            <h3>How to fix this?</h3>
-            <ul>
-                <li>Ensure the video was NOT deleted from the Log Channel.</li>
-                <li>Ensure your Bot is an <b>ADMIN</b> in the Log Channel.</li>
-                <li>If using Multi-Clients, ALL bots must be Admins in the Log Channel!</li>
-            </ul>
-        </div>
-        """
-        return web.Response(status=404, text=html_error, content_type="text/html")
-    except Exception as e:
-        return web.Response(status=500, text=f"<h1>500 Server Error</h1><p>{str(e)}</p>", content_type="text/html")
-
-@routes.get(r"/{path}/{user_path}/{second}/{third}", allow_head=True)
-async def stream_handler(request: web.Request):
-    try:
-        id = int(await decode(request.match_info["path"]))
-        user_id = int(await decode(request.match_info["user_path"]))
-        secid = int(await decode(request.match_info["second"]))
-        thid = int(await decode(request.match_info["third"]))
-        return web.Response(text=await render_page(id, user_id, secid, thid), content_type='text/html')
-    except: return web.Response(text=html_content, content_type='text/html')
-
-@routes.get('/{short_link}', allow_head=True)
-async def get_original(request: web.Request):
-    short_link = request.match_info["short_link"]
-    original = await decode(short_link)
-    if original:
+        # Display name with spaces
+        clean_name = file_name.replace("_", " ")
+        
+        # 🔥 FIX: URL mein bilkul bhi space na ho uske liye spaces ko _ se replace kiya gaya hai
+        url_safe_name = file_name.replace(" ", "_")
+        safe_filename = urllib.parse.quote(url_safe_name)
+        
         base_url = STREAM_URL.rstrip('/')
-        raise web.HTTPFound(f"{base_url}/link?{original}")
-    else:
-        return web.Response(text=html_content, content_type='text/html')
-
-class_cache = {}
-async def media_streamer(request: web.Request, id: int, secure_hash: str):
-    range_header = request.headers.get("Range", 0)
-    index = min(work_loads, key=work_loads.get)
-    faster_client = multi_clients[index]
-    
-    if faster_client in class_cache:
-        tg_connect = class_cache[faster_client]
-    else:
-        tg_connect = ByteStreamer(faster_client)
-        class_cache[faster_client] = tg_connect
+        direct_link = f"{base_url}/dl/{message_id}/{safe_filename}"
         
-    file_id = await tg_connect.get_file_properties(id)
-    file_size = file_id.file_size
+        return direct_link, clean_name
+            
+    except Exception as e:
+        print(f"Error in get_stream_url: {e}")
+        return None, None
 
-    if range_header:
-        from_bytes, until_bytes = range_header.replace("bytes=", "").split("-")
-        from_bytes = int(from_bytes)
-        until_bytes = int(until_bytes) if until_bytes else file_size - 1
+async def encode(string):
+    string_bytes = str(string).encode("ascii")
+    base64_bytes = base64.urlsafe_b64encode(string_bytes)
+    return (base64_bytes.decode("ascii")).strip("=")
+
+async def decode(base64_string):
+    try:
+        base64_string = base64_string.strip("=")
+        base64_bytes = (base64_string + "=" * (-len(base64_string) % 4)).encode("ascii")
+        string_bytes = base64.urlsafe_b64decode(base64_bytes)
+        return string_bytes.decode("ascii")
+    except Exception:
+        return None
+
+
+# --- Start Command ---
+@Client.on_message(filters.command("start") & filters.private)
+async def start(client, message):
+    if not await checkdb.is_user_exist(message.from_user.id):
+        await db.add_user(message.from_user.id, message.from_user.first_name)
+        name = await client.ask(message.chat.id, "<b>Welcome To VJ Disk.\n\nSend Business Name:\nEx :- <code>Tech VJ</code></b>")
+        if name.text:
+            await db.set_name(message.from_user.id, name=name.text)
+        else:
+            return await message.reply("Wrong Input. /start again.")
+        
+        link = await client.ask(message.chat.id, "<b>Send Telegram Channel Link:\nEx :- <code>https://t.me/VJ_Bots</code></b>")
+        if link.text and link.text.startswith(('http://', 'https://')):
+            await db.set_link(message.from_user.id, link=link.text)
+        else:
+            return await message.reply("Wrong Input. /start again.")
+            
+        await checkdb.add_user(message.from_user.id, message.from_user.first_name)
+        return await message.reply("<b>Account Created Successfully! 🎉\n\nUse /quality for quality options.\nSend any file to get direct link.</b>")
     else:
-        from_bytes = request.http_range.start or 0
-        until_bytes = (request.http_range.stop or file_size) - 1
+        buttons = [[InlineKeyboardButton("✨ Update Channel", url="https://t.me/VJ_Disk")]]
+        if message.from_user.id in ADMINS:
+            buttons.append([InlineKeyboardButton("🔥 Open Firebase Panel", callback_data="fb_cat_list")])
+        await client.send_message(chat_id=message.from_user.id, text=script.START_TXT.format(message.from_user.mention), reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.HTML)
+        return
 
-    if (until_bytes > file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
-        return web.Response(status=416, body="416: Range not satisfiable", headers={"Content-Range": f"bytes */{file_size}"})
+# --- Update Command ---
+@Client.on_message(filters.command("update") & filters.private)
+async def update(client, message):
+    name = await client.ask(message.chat.id, "<b>Send New Business Name:\n/cancel to cancel</b>")
+    if name.text == "/cancel": return await message.reply("Cancelled")
+    if name.text: await db.set_name(message.from_user.id, name=name.text)
+    link = await client.ask(message.chat.id, "<b>Send New Channel Link:</b>")
+    if link.text and link.text.startswith(('http://', 'https://')):
+        await db.set_link(message.from_user.id, link=link.text)
+        await message.reply("<b>Updated Successfully.</b>")
+    else:
+        await message.reply("Invalid Link.")
 
-    chunk_size = 1024 * 1024
-    until_bytes = min(until_bytes, file_size - 1)
-    offset = from_bytes - (from_bytes % chunk_size)
-    first_part_cut = from_bytes - offset
-    last_part_cut = until_bytes % chunk_size + 1
-    req_length = until_bytes - from_bytes + 1
-    part_count = math.ceil(until_bytes / chunk_size) - math.floor(offset / chunk_size)
+# --- File Handler ---
+@Client.on_message(filters.private & (filters.document | filters.video | filters.photo | filters.audio))
+async def universal_handler(client, message):
+    if not message.media: return
+
+    try:
+        log_msg = await message.copy(LOG_CHANNEL)
+    except Exception as e:
+        print(f"Error copying to log: {e}")
+        return await message.reply("Error saving file. Check bot permissions in Log Channel.")
+
+    direct_link, clean_name = await get_stream_url(client, log_msg.id)
+    if not direct_link:
+        return await message.reply("Error generating link.")
+
+    params = {'u': message.from_user.id, 'w': str(log_msg.id), 's': str(0), 't': str(0)}
+    base_link_url = LINK_URL.rstrip('/')
+    website_url = f"{base_link_url}?Tech_VJ={await encode(urllib.parse.urlencode(params))}"
     
-    body = tg_connect.yield_file(file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size)
-    mime_type = file_id.mime_type or mimetypes.guess_type(file_id.file_name or "")[0] or "application/octet-stream"
-    file_name = file_id.file_name or f"{secrets.token_hex(2)}.unknown"
+    text = f"**📂 Name:** `{clean_name}`\n\n**🔗 Direct Stream URL:**\n`{direct_link}`\n\n**🌐 Website Link:**\n`{website_url}`"
+    buttons = [[InlineKeyboardButton("⬇️ Direct Download", url=direct_link)], [InlineKeyboardButton("🖥️ Watch Online", url=website_url)]]
+    if message.from_user.id in ADMINS:
+        buttons.append([InlineKeyboardButton("🔥 Add to Firebase", callback_data="fb_cat_list")])
 
-    return web.Response(
-        status=206 if range_header else 200,
-        body=body,
-        headers={
-            "Content-Type": f"{mime_type}",
-            "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-            "Content-Length": str(req_length),
-            "Content-Disposition": f'attachment; filename="{file_name}"',
-            "Accept-Ranges": "bytes",
-        },
-    )
+    await message.reply_text(text=text, reply_markup=InlineKeyboardMarkup(buttons), disable_web_page_preview=True)
+
+@Client.on_message(filters.private & filters.command("quality"))
+async def quality_link(client, message):
+    await message.reply("Quality Feature is currently simplified. Use direct file send for best links.")
+
+@Client.on_message(filters.private & filters.text & ~filters.command(["account", "withdraw", "notify", "quality", "start", "update", "firebase"]))
+async def link_start(client, message):
+    if not message.text.startswith(LINK_URL): return
+    try:
+        link_part = message.text.split("?Tech_VJ=")[1]
+        decoded = await decode(link_part)
+        if not decoded: return await message.reply("Invalid Link")
+        data = {x.split("=")[0]: x.split("=")[1] for x in decoded.split("&")}
+        msg_id = data.get('w')
+        if msg_id and msg_id != "0":
+            link, name = await get_stream_url(client, int(msg_id))
+            await message.reply(f"**🎬 Video:** `{name}`\n\n**🔗 Direct Link:**\n`{link}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Download", url=link)]]))
+        else:
+            await message.reply("Content not found.")
+    except Exception as e:
+        await message.reply(f"Error: {e}")
+
+@Client.on_message(filters.private & filters.command("account"))
+async def show_account(client, message):
+    clicks = get_count(message.from_user.id) or 0
+    balance = f"{clicks / 1000.0:.2f}"
+    await message.reply(f"**🆔 API Key:** `{message.from_user.id}`\n**▶️ Plays:** {clicks}\n**💰 Balance:** ${balance}")
+
+@Client.on_message(filters.private & filters.command("withdraw"))
+async def show_withdraw(client, message):
+    clicks = get_count(message.from_user.id) or 0
+    if clicks < 1000:
+        return await message.reply("Minimum withdrawal is 1000 Plays.")
+    if get_withdraw(message.from_user.id):
+        return await message.reply("Withdrawal already pending.")
+    await client.send_message(ADMINS[0], f"Withdraw Request from {message.from_user.id}\nPlays: {clicks}")
+    record_withdraw(message.from_user.id, True)
+    await message.reply("Withdrawal request sent.")
+
+@Client.on_message(filters.private & filters.command("notify") & filters.user(ADMINS))
+async def show_notify(client, message):
+    await message.reply("Use manual notification for now.")
