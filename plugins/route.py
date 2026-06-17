@@ -37,12 +37,10 @@ html_content = """
 </html>
 """
 
-# 1. ROOT ROUTE
 @routes.get("/", allow_head=True)
 async def root_route_handler(request):
     return web.Response(text=html_content, content_type='text/html')
 
-# 2. CLICK COUNTER
 @routes.post('/click-counter')
 async def handle_click(request):
     try:
@@ -59,7 +57,6 @@ async def handle_click(request):
             return response
     except: pass
 
-# 3. LINK GENERATOR ROUTE
 @routes.get('/link', allow_head=True)
 async def visits(request: web.Request):
     user, watch, second, third = request.query.get('u'), request.query.get('w'), request.query.get('s'), request.query.get('t')
@@ -67,39 +64,46 @@ async def visits(request: web.Request):
     base_url = STREAM_URL.rstrip('/')
     raise web.HTTPFound(f"{base_url}/{data}/{user_id}/{sec_id}/{th_id}")
 
-# 4. 🔥 MASTER DOWNLOAD ROUTE (Fixes 404 routing conflict completely)
-@routes.get(r"/dl/{path:.*}", allow_head=True)
-async def stream_handler_master(request: web.Request):
+# 🔥 SMART DOWNLOAD ROUTE (Traps 404 Errors & Fixes Spaces)
+@routes.get(r"/dl/{path:.+}", allow_head=True)
+async def stream_handler_legacy(request: web.Request):
     try:
         path = request.match_info["path"]
-        id_match = re.search(r"(\d+)", path)
-        if not id_match:
-            return web.Response(status=404, text="404 Error: Invalid Link, Message ID not found in URL.")
+        match = re.search(r"^([a-zA-Z0-9_-]{6})(\d+)$", path)
+        if match:
+            secure_hash = match.group(1)
+            id = int(match.group(2))
+        else:
+            id_match = re.search(r"^(\d+)", path)
+            if id_match:
+                id = int(id_match.group(1))
+            else:
+                return web.Response(status=404, text="<h1>404 Error</h1><p>Invalid Video Link Format.</p>", content_type="text/html")
+            secure_hash = request.rel_url.query.get("hash", "")
+            
+        return await media_streamer(request, id, secure_hash)
         
-        message_id = int(id_match.group(1))
-        secure_hash = request.rel_url.query.get("hash", "")
-        return await media_streamer(request, message_id, secure_hash)
+    except InvalidHash as e:
+        return web.Response(status=403, text=f"<h1>403 Forbidden</h1><p>{e.message}</p>", content_type="text/html")
     except FIleNotFound as e:
-        return web.Response(status=404, text=f"404 Error: File not found in Telegram! Please ensure Bot is Admin in Log Channel and the video was not deleted. Details: {e.message}")
+        # 🔥 SMART ERROR: Ab blank page nahi aayega! Ye screen par problem batayega.
+        html_error = f"""
+        <div style='font-family: Arial; padding: 20px;'>
+            <h1 style='color: red;'>Telegram File Missing (404)</h1>
+            <p>The Bot cannot access the video file in your Telegram Log Channel.</p>
+            <p><b>Reason:</b> {e.message}</p>
+            <h3>How to fix this?</h3>
+            <ul>
+                <li>Ensure the video was NOT deleted from the Log Channel.</li>
+                <li>Ensure your Bot is an <b>ADMIN</b> in the Log Channel.</li>
+                <li>If using Multi-Clients, ALL bots must be Admins in the Log Channel!</li>
+            </ul>
+        </div>
+        """
+        return web.Response(status=404, text=html_error, content_type="text/html")
     except Exception as e:
-        return web.Response(status=500, text=f"Server Error: {str(e)}")
+        return web.Response(status=500, text=f"<h1>500 Server Error</h1><p>{str(e)}</p>", content_type="text/html")
 
-# 5. 🔥 STREAM ROUTE
-@routes.get(r"/stream/{path:.*}", allow_head=True)
-async def stream_handler_rotation(request):
-    try:
-        path = request.match_info["path"]
-        id_match = re.search(r"(\d+)", path)
-        if not id_match:
-            return web.Response(status=404, text="404 Error: Invalid Stream ID.")
-        message_id = int(id_match.group(1))
-        return await media_streamer(request, message_id, "")
-    except FIleNotFound as e:
-        return web.Response(status=404, text=f"404 Error: Telegram File Missing! {e.message}")
-    except Exception as e:
-        return web.Response(status=500, text=f"Server Error: {str(e)}")
-
-# 6. WATCH ONLINE PAGE RENDER ROUTE
 @routes.get(r"/{path}/{user_path}/{second}/{third}", allow_head=True)
 async def stream_handler(request: web.Request):
     try:
@@ -110,7 +114,6 @@ async def stream_handler(request: web.Request):
         return web.Response(text=await render_page(id, user_id, secid, thid), content_type='text/html')
     except: return web.Response(text=html_content, content_type='text/html')
 
-# 7. SHORT LINK ROUTE (Hamesha Last me hona chahiye taaki `/dl/` block na ho)
 @routes.get('/{short_link}', allow_head=True)
 async def get_original(request: web.Request):
     short_link = request.match_info["short_link"]
@@ -121,7 +124,6 @@ async def get_original(request: web.Request):
     else:
         return web.Response(text=html_content, content_type='text/html')
 
-# === MEDIA STREAMER LOGIC ===
 class_cache = {}
 async def media_streamer(request: web.Request, id: int, secure_hash: str):
     range_header = request.headers.get("Range", 0)
