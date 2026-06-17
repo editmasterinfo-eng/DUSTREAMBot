@@ -13,7 +13,7 @@ from info import ADMINS
 # ⚙️ 1. CONFIGURATION
 # ==========================================
 SOURCE_CHANNEL = -1003897025049  
-STREAM_URL = "https://dustreambot.onrender.com"  # ✅ New Stream URL
+STREAM_URL = "https://dustreambot.onrender.com"
 
 firebaseConfig = {
     "apiKey": "AIzaSyBhMItJzgDtMmwLesBqs1mUzna3-0WD8Rk",
@@ -39,10 +39,12 @@ def get_name(data):
     return "Unnamed"
 
 def get_file_name_robust(message):
-    if message.document and message.document.file_name: return message.document.file_name
-    if message.video and message.video.file_name: return message.video.file_name
-    if message.audio and message.audio.file_name: return message.audio.file_name
-    return "Unknown_File"
+    if message.document and getattr(message.document, 'file_name', None): return message.document.file_name
+    if message.video and getattr(message.video, 'file_name', None): return message.video.file_name
+    if message.audio and getattr(message.audio, 'file_name', None): return message.audio.file_name
+    if message.photo: return f"Image_{message.id}.png"
+    if message.caption: return message.caption[:30] + ".mp4"
+    return f"File_{message.id}.mp4"
 
 def get_stream_url(msg):
     file_name = get_file_name_robust(msg)
@@ -53,14 +55,14 @@ def get_stream_url(msg):
 
 def extract_module_name(caption):
     """🔥 Extract Module Name precisely from your caption format"""
-    if not caption: return "Main Files"
+    if not caption: return "Main Module"
     match = re.search(r'/folder\s+([^\n]+)', caption)
     if match:
         path = match.group(1).strip()
         parts = [p.strip() for p in path.split('/') if p.strip()]
         if len(parts) > 0:
             return parts[-1]  # Returns the exact subfolder name
-    return "Main Files"
+    return "Main Module"
 
 # ==========================================
 # 🛡️ 3. VIP TRACK FILTERS
@@ -171,7 +173,7 @@ async def handle_names(client, message: Message):
         ref = db.child("categories").push({"title": text, "id": ""})
         cat_id = ref['name']
         db.child("categories").child(cat_id).update({"id": cat_id})
-        user_session[user_id].update({"cat_id": cat_id, "state": "selecting_batch"})
+        user_session[user_id].update({"cat_id": cat_id, "state": "waiting_batch_name"})
         buttons = [[InlineKeyboardButton("➕ Create New Batch", callback_data="fbnewbatch")], [InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")]]
         await message.reply_text(f"✅ Category `{text}` Created!\n\n**Step 2:** Select or Create a Batch inside it:", reply_markup=InlineKeyboardMarkup(buttons))
         
@@ -203,11 +205,9 @@ async def handle_files(client, message: Message):
     state = user_session[user_id]["state"]
     msg_id = message.forward_from_message_id if message.forward_from_message_id else message.id
     
-    # 🔥 Smart Trick: Grab the exact channel ID from the forwarded message!
     source_chat_id = SOURCE_CHANNEL
     if message.forward_from_chat:
         source_chat_id = message.forward_from_chat.id
-    
     user_session[user_id]["source_chat"] = source_chat_id
 
     if state == "waiting_first_file_auto":
@@ -243,6 +243,8 @@ async def process_bulk_auto(client, message, user_id):
         
     status_msg = await message.reply_text("🔄 **Starting Live Scan...**")
     cat_id, batch_id = user_session[user_id]["cat_id"], user_session[user_id]["batch_id"]
+    
+    # 🔥 FIX: Ensuring Path is strictly inside the selected Category -> Batch
     base_db_path = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules")
     
     module_cache = {}
@@ -251,14 +253,15 @@ async def process_bulk_auto(client, message, user_id):
     timestamp_base = int(time.time() * 1000)
     last_update_time = time.time()
     
-    # ⚡ FAST CHUNK FETCHING (50 messages at a time)
+    # 🔥 NEW: Smart File Extension Check
+    video_exts = ['.mp4', '.mkv', '.avi', '.webm', '.mov', '.flv', '.wmv', '.m4v', '.png', '.jpg', '.jpeg']
+    
     all_ids = list(range(start_id, end_id + 1))
     
     try:
         for i in range(0, len(all_ids), 50):
             chunk_ids = all_ids[i:i + 50]
             try:
-                # Get 50 messages instantly
                 messages = await client.get_messages(source_chat, chunk_ids)
             except Exception as e:
                 failed_count += len(chunk_ids)
@@ -268,14 +271,8 @@ async def process_bulk_auto(client, message, user_id):
             for msg in messages:
                 scanned += 1
                 
-                if msg.empty:
-                    failed_count += 1
-                    failed_logs.append(f"ID {msg.id}: Message Deleted/Empty")
-                    continue
-                    
-                if not getattr(msg, "media", None):
-                    failed_count += 1
-                    failed_logs.append(f"ID {msg.id}: Not a Video or File")
+                # Faltu ke text messages ko chupchap skip karna hai, errors me nahi dikhana
+                if msg.empty or not getattr(msg, "media", None):
                     continue
                 
                 try:
@@ -289,9 +286,16 @@ async def process_bulk_auto(client, message, user_id):
                         module_cache[mod_name] = mod_id
                     
                     mod_id = module_cache[mod_name]
-                    target_node = "lectures" if msg.video else "resources"
                     
-                    if msg.video: v_count += 1
+                    # 🔥 FIX: Checking Extension instead of Telegram's internal type
+                    file_name_lower = get_file_name_robust(msg).lower()
+                    is_video = False
+                    if getattr(msg, "video", None) or getattr(msg, "photo", None): is_video = True
+                    elif any(file_name_lower.endswith(ext) for ext in video_exts): is_video = True
+                    
+                    target_node = "lectures" if is_video else "resources"
+                    
+                    if is_video: v_count += 1
                     else: f_count += 1
                     
                     payload = {"name": clean_name, "link": direct_link, "order": timestamp_base + scanned, "thumbnail": ""}
@@ -302,7 +306,6 @@ async def process_bulk_auto(client, message, user_id):
                     failed_count += 1
                     failed_logs.append(f"ID {msg.id}: {str(ex)[:30]}")
 
-                # 🔥 LIVE DASHBOARD UPDATE (Every 2 seconds)
                 now = time.time()
                 if now - last_update_time > 2.0:
                     ui = (
@@ -313,11 +316,8 @@ async def process_bulk_auto(client, message, user_id):
                         f"📄 **Current File:** `{clean_name[:25]}...`\n\n"
                         f"📊 **Progress Stats:**\n"
                         f"✅ **Added Successfully:** {v_count + f_count} (🎬 {v_count} | 📑 {f_count})\n"
-                        f"❌ **Failed/Skipped:** {failed_count}\n"
+                        f"❌ **Failed:** {failed_count}\n"
                     )
-                    if failed_logs:
-                        ui += f"\n⚠️ **Recent Errors:**\n" + "\n".join([f"• `{err}`" for err in failed_logs[-3:]])
-                        
                     try:
                         await status_msg.edit_text(ui)
                         last_update_time = now
@@ -330,11 +330,11 @@ async def process_bulk_auto(client, message, user_id):
             f"📂 **Modules Auto-Created:** {len(module_cache)}\n"
             f"🎬 **Videos Successfully Added:** {v_count}\n"
             f"📑 **Files/PDFs Successfully Added:** {f_count}\n"
-            f"❌ **Total Skipped/Failed:** {failed_count}\n\n"
+            f"❌ **Total Failed:** {failed_count}\n\n"
             f"🔥 *All data dynamically structured into Firebase!*"
         )
         if failed_logs:
-            final_ui += f"\n\n⚠️ **Main Errors Summary:**\n" + "\n".join([f"• `{err}`" for err in failed_logs[:5]])
+            final_ui += f"\n\n⚠️ **Errors Summary:**\n" + "\n".join([f"• `{err}`" for err in failed_logs[:5]])
             
         await status_msg.edit_text(final_ui)
         
@@ -344,10 +344,9 @@ async def process_bulk_auto(client, message, user_id):
         user_session[user_id] = {"state": "idle"}
 
 # ==========================================
-# ⚡ 8. MANUAL PROCESSOR (For single modules)
+# ⚡ 8. MANUAL PROCESSOR
 # ==========================================
 async def process_bulk_manual(client, message, user_id):
-    # Same advanced logic for manual module selection
     start_id, end_id = user_session[user_id]["start_id"], user_session[user_id]["end_id"]
     source_chat = user_session[user_id].get("source_chat", SOURCE_CHANNEL)
     if start_id > end_id: start_id, end_id = end_id, start_id
@@ -358,30 +357,32 @@ async def process_bulk_manual(client, message, user_id):
     db_path = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules").child(mod_id)
     
     v_count = f_count = failed_count = scanned = 0
-    failed_logs = []
     timestamp_base = int(time.time() * 1000)
     last_update_time = time.time()
     
+    video_exts = ['.mp4', '.mkv', '.avi', '.webm', '.mov', '.flv', '.wmv', '.m4v', '.png', '.jpg', '.jpeg']
     all_ids = list(range(start_id, end_id + 1))
     
     try:
         for i in range(0, len(all_ids), 50):
             chunk_ids = all_ids[i:i + 50]
             try: messages = await client.get_messages(source_chat, chunk_ids)
-            except Exception as e:
-                failed_count += len(chunk_ids)
-                failed_logs.append(f"Channel Error: {str(e)[:30]}")
-                continue
+            except: continue
                 
             for msg in messages:
                 scanned += 1
-                if msg.empty or not getattr(msg, "media", None):
-                    failed_count += 1
-                    continue
+                if msg.empty or not getattr(msg, "media", None): continue
+                
                 try:
                     direct_link, clean_name = get_stream_url(msg)
-                    target_node = "lectures" if msg.video else "resources"
-                    if msg.video: v_count += 1
+                    
+                    file_name_lower = get_file_name_robust(msg).lower()
+                    is_video = False
+                    if getattr(msg, "video", None) or getattr(msg, "photo", None): is_video = True
+                    elif any(file_name_lower.endswith(ext) for ext in video_exts): is_video = True
+                    
+                    target_node = "lectures" if is_video else "resources"
+                    if is_video: v_count += 1
                     else: f_count += 1
                     
                     payload = {"name": clean_name, "link": direct_link, "order": timestamp_base + scanned, "thumbnail": ""}
@@ -389,11 +390,10 @@ async def process_bulk_manual(client, message, user_id):
                     db_path.child(target_node).child(ref['name']).update({"id": ref['name']})
                 except Exception as ex:
                     failed_count += 1
-                    failed_logs.append(f"ID {msg.id}: {str(ex)[:30]}")
 
                 now = time.time()
                 if now - last_update_time > 2.0:
-                    ui = f"⚡ **MANUAL SYNC ({scanned}/{total_files})**\n━━━━━━━━━━━━━━━━━━━━\n📄 `{clean_name[:25]}...`\n✅ Added: {v_count + f_count} | ❌ Failed: {failed_count}"
+                    ui = f"⚡ **MANUAL SYNC ({scanned}/{total_files})**\n━━━━━━━━━━━━━━━━━━━━\n📄 `{clean_name[:25]}...`\n✅ Added: {v_count + f_count} (🎬 {v_count} | 📑 {f_count}) | ❌ Failed: {failed_count}"
                     try: await status_msg.edit_text(ui); last_update_time = now
                     except: pass
                     
