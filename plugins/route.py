@@ -2,7 +2,7 @@
 import re, math, logging, secrets, mimetypes, time
 from aiohttp import web
 
-# 🔥 FIX: Moved 'routes' definition to the absolute top to prevent Circular Import Error!
+# 🔥 FIX: Routes Top par define kiya hai taaki Import Error kabhi na aaye
 routes = web.RouteTableDef()
 
 from info import *
@@ -28,7 +28,6 @@ html_content = """
         body { margin: 0; font-family: 'Arial', sans-serif; background: linear-gradient(135deg, #ff7e5f, #feb47b); color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; text-align: center; }
         h1 { font-size: 4em; text-shadow: 2px 2px 10px rgba(0,0,0,0.5); }
         p { font-size: 1.5em; margin-top: 20px; }
-        .button { margin-top: 30px; padding: 15px 30px; font-size: 1.2em; background-color: #4CAF50; border: none; border-radius: 5px; color: white; cursor: pointer; }
     </style>
 </head>
 <body>
@@ -49,14 +48,12 @@ async def handle_click(request):
         data = await request.json()
         user_id = int(data.get('user_id'))
         today = datetime.now().strftime('%Y-%m-%d')
-        user_agent = request.headers.get('User-Agent')
-        if "Chrome" in user_agent or "Google Inc" in user_agent:
-            if request.cookies.get('visited') == today: return
-            response = web.Response(text="Hello, World!")
-            response.set_cookie('visited', today, max_age=24*60*60)
-            u = get_count(user_id)
-            record_visit(user_id, int(u + 1) if u else 1)
-            return response
+        if request.cookies.get('visited') == today: return
+        response = web.Response(text="Counted")
+        response.set_cookie('visited', today, max_age=24*60*60)
+        u = get_count(user_id)
+        record_visit(user_id, int(u + 1) if u else 1)
+        return response
     except: pass
 
 @routes.get('/link', allow_head=True)
@@ -66,45 +63,34 @@ async def visits(request: web.Request):
     base_url = STREAM_URL.rstrip('/')
     raise web.HTTPFound(f"{base_url}/{data}/{user_id}/{sec_id}/{th_id}")
 
-# 🔥 SMART DOWNLOAD ROUTE (Traps 404 Errors & Fixes Spaces)
-@routes.get(r"/dl/{path:.+}", allow_head=True)
-async def stream_handler_legacy(request: web.Request):
+# 🔥 MASTER DOWNLOAD ROUTE: Ye har tarah ke link (/watch/123, /dl/123) ko properly stream karega!
+@routes.get('/watch/{id}', allow_head=True)
+@routes.get('/dl/{id}', allow_head=True)
+@routes.get('/dl/{id}/{name}', allow_head=True)
+@routes.get('/stream/{id}', allow_head=True)
+async def stream_handler_master(request: web.Request):
     try:
-        path = request.match_info["path"]
-        match = re.search(r"^([a-zA-Z0-9_-]{6})(\d+)$", path)
+        id_str = request.match_info.get("id")
+        
+        # ID extracting logic
+        match = re.search(r"^([a-zA-Z0-9_-]{6})(\d+)$", id_str)
         if match:
             secure_hash = match.group(1)
-            id = int(match.group(2))
+            msg_id = int(match.group(2))
         else:
-            id_match = re.search(r"^(\d+)", path)
-            if id_match:
-                id = int(id_match.group(1))
-            else:
-                return web.Response(status=404, text="<h1>404 Error</h1><p>Invalid Video Link Format.</p>", content_type="text/html")
+            id_match = re.search(r"(\d+)", id_str)
+            if not id_match:
+                return web.Response(status=404, text="<h1>404 Error: Invalid ID format.</h1>", content_type="text/html")
+            msg_id = int(id_match.group(1))
             secure_hash = request.rel_url.query.get("hash", "")
             
-        return await media_streamer(request, id, secure_hash)
+        return await media_streamer(request, msg_id, secure_hash)
         
-    except InvalidHash as e:
-        return web.Response(status=403, text=f"<h1>403 Forbidden</h1><p>{e.message}</p>", content_type="text/html")
     except FIleNotFound as e:
-        # 🔥 SMART ERROR: Ab blank page nahi aayega! Ye screen par problem batayega.
-        html_error = f"""
-        <div style='font-family: Arial; padding: 20px;'>
-            <h1 style='color: red;'>Telegram File Missing (404)</h1>
-            <p>The Bot cannot access the video file in your Telegram Log Channel.</p>
-            <p><b>Reason:</b> {e.message}</p>
-            <h3>How to fix this?</h3>
-            <ul>
-                <li>Ensure the video was NOT deleted from the Log Channel.</li>
-                <li>Ensure your Bot is an <b>ADMIN</b> in the Log Channel.</li>
-                <li>If using Multi-Clients, ALL bots must be Admins in the Log Channel!</li>
-            </ul>
-        </div>
-        """
-        return web.Response(status=404, text=html_error, content_type="text/html")
+        error_html = f"<h2>404 Error: File Not Found in Telegram!</h2><p>Reason: {e.message}</p><p>Please Ensure Bot is Admin in your Log Channel.</p>"
+        return web.Response(status=404, text=error_html, content_type="text/html")
     except Exception as e:
-        return web.Response(status=500, text=f"<h1>500 Server Error</h1><p>{str(e)}</p>", content_type="text/html")
+        return web.Response(status=500, text=f"Internal Server Error: {str(e)}", content_type="text/html")
 
 @routes.get(r"/{path}/{user_path}/{second}/{third}", allow_head=True)
 async def stream_handler(request: web.Request):
@@ -123,8 +109,7 @@ async def get_original(request: web.Request):
     if original:
         base_url = STREAM_URL.rstrip('/')
         raise web.HTTPFound(f"{base_url}/link?{original}")
-    else:
-        return web.Response(text=html_content, content_type='text/html')
+    return web.Response(text=html_content, content_type='text/html')
 
 class_cache = {}
 async def media_streamer(request: web.Request, id: int, secure_hash: str):
@@ -132,8 +117,7 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
     index = min(work_loads, key=work_loads.get)
     faster_client = multi_clients[index]
     
-    if faster_client in class_cache:
-        tg_connect = class_cache[faster_client]
+    if faster_client in class_cache: tg_connect = class_cache[faster_client]
     else:
         tg_connect = ByteStreamer(faster_client)
         class_cache[faster_client] = tg_connect
