@@ -12,8 +12,8 @@ from info import ADMINS
 # ==========================================
 # ⚙️ 1. CONFIGURATION
 # ==========================================
-SOURCE_CHANNEL = -1003897025049  
-STREAM_URL = "https://dustreambot.onrender.com"  # ✅ Fixed Domain
+SOURCE_CHANNEL = -1003911500529  # ✅ Naya Channel ID Update kar diya gaya hai
+STREAM_URL = "https://dustreambot.onrender.com"
 
 firebaseConfig = {
     "apiKey": "AIzaSyBhMItJzgDtMmwLesBqs1mUzna3-0WD8Rk",
@@ -50,12 +50,10 @@ def get_stream_url(msg):
     file_name = get_file_name_robust(msg)
     clean_name = file_name.replace("_", " ").replace("-", " ")
     safe_filename = urllib.parse.quote_plus(file_name)
-    # 🔥 FIX: Removed '/dl/' to prevent 404 error in DUSTREAMBot
-    direct_link = f"{STREAM_URL}/{msg.id}/{safe_filename}"
+    direct_link = f"{STREAM_URL}/{msg.id}/{safe_filename}"  # No /dl/ -> Prevents 404
     return direct_link, clean_name
 
 def extract_module_name(caption):
-    """🔥 Extract exact subfolder name from caption"""
     if not caption: return "Main Module"
     match = re.search(r'/folder\s+([^\n]+)', caption)
     if match:
@@ -65,18 +63,24 @@ def extract_module_name(caption):
             return parts[-1]
     return "Main Module"
 
-# 🔥 FIX: THREAD-SAFE FIREBASE FUNCTIONS (Prevents Root Dumping)
+def create_progress_bar(scanned, total, length=16):
+    if total == 0: return "░" * length
+    filled = int((scanned / total) * length)
+    empty = length - filled
+    return "█" * filled + "░" * empty
+
+# 🔥 EXTREMELY STRICT THREAD-SAFE PATHS (Guarantees zero Root Dumps)
 def fb_create_module(cat_id, batch_id, mod_name):
-    path = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules")
-    ref = path.push({"name": mod_name, "id": ""})
+    path_str = f"categories/{cat_id}/batches/{batch_id}/modules"
+    ref = db.child(path_str).push({"name": mod_name, "id": ""})
     mod_id = ref['name']
-    path.child(mod_id).update({"id": mod_id})
+    db.child(f"{path_str}/{mod_id}").update({"id": mod_id})
     return mod_id
 
 def fb_push_file(cat_id, batch_id, mod_id, target_node, payload):
-    path = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules").child(mod_id).child(target_node)
-    file_ref = path.push(payload)
-    path.child(file_ref['name']).update({"id": file_ref['name']})
+    path_str = f"categories/{cat_id}/batches/{batch_id}/modules/{mod_id}/{target_node}"
+    file_ref = db.child(path_str).push(payload)
+    db.child(f"{path_str}/{file_ref['name']}").update({"id": file_ref['name']})
 
 # ==========================================
 # 🛡️ 3. VIP TRACK FILTERS
@@ -106,7 +110,7 @@ async def new_cmd(client, message: Message):
                 if v and isinstance(v, dict): buttons.append([InlineKeyboardButton(f"📂 {get_name(v)}", callback_data=f"fbcat_{k}")])
         buttons.append([InlineKeyboardButton("➕ Create New Category", callback_data="fbnewcat")])
         buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")])
-        await message.reply_text("🔥 **Auto-Bulk Sync Started!**\n\n**Step 1:** Select a Category or Create New:", reply_markup=InlineKeyboardMarkup(buttons))
+        await message.reply_text("🔥 **Ghost Protocol Syncer Started!**\n\n**Step 1:** Select Category:", reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
         await message.reply_text(f"Database Error: {e}")
     raise StopPropagation
@@ -118,13 +122,13 @@ async def see_cmd(client, message: Message):
 @Client.on_callback_query(filters.regex("^fbcancel"), group=-1)
 async def cancel_cb(client, query):
     user_session[query.from_user.id] = {"state": "idle"}
-    await query.message.edit_text("🚫 **Process Cancelled.**")
+    await query.message.edit_text("🚫 **Mission Aborted.**")
     raise StopPropagation
 
 @Client.on_callback_query(filters.regex("^fbnewcat"), group=-1)
 async def new_cat_btn(client, query):
     user_session[query.from_user.id]["state"] = "waiting_cat_name"
-    await query.message.edit_text("📝 **Type the name for the NEW CATEGORY:**")
+    await query.message.edit_text("📝 **Enter Name for NEW CATEGORY:**")
     raise StopPropagation
 
 @Client.on_callback_query(filters.regex("^fbcat_"), group=-1)
@@ -139,14 +143,14 @@ async def sel_cat(client, query):
                 if v and isinstance(v, dict): buttons.append([InlineKeyboardButton(f"🎬 {get_name(v)}", callback_data=f"fbbatch_{k}")])
         buttons.append([InlineKeyboardButton("➕ Create New Batch", callback_data="fbnewbatch")])
         buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")])
-        await query.message.edit_text("**Step 2:** Select a Batch or Create New:", reply_markup=InlineKeyboardMarkup(buttons))
+        await query.message.edit_text("**Step 2:** Select Batch:", reply_markup=InlineKeyboardMarkup(buttons))
     except: pass
     raise StopPropagation
 
 @Client.on_callback_query(filters.regex("^fbnewbatch"), group=-1)
 async def new_batch_btn(client, query):
     user_session[query.from_user.id]["state"] = "waiting_batch_name"
-    await query.message.edit_text("📝 **Type the name for the NEW BATCH:**")
+    await query.message.edit_text("📝 **Enter Name for NEW BATCH:**")
     raise StopPropagation
 
 @Client.on_callback_query(filters.regex("^fbbatch_"), group=-1)
@@ -154,23 +158,23 @@ async def sel_batch(client, query):
     batch_id = query.data.split("_")[1]
     user_session[query.from_user.id].update({"batch_id": batch_id})
     buttons = [
-        [InlineKeyboardButton("⚡ AUTOMATIC (Smart Caption)", callback_data="fbauto_mode")],
+        [InlineKeyboardButton("⚡ AUTOMATIC (Ghost Mode)", callback_data="fbauto_mode")],
         [InlineKeyboardButton("➕ New Module (Manual)", callback_data="fbnewmod")],
         [InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")]
     ]
-    await query.message.edit_text("🎯 **Batch Locked! Choose Upload Mode:**\n\n⚡ **AUTOMATIC:** Bot will read captions and auto-create modules for you.\n➕ **MANUAL:** Create 1 module and put all files inside it.", reply_markup=InlineKeyboardMarkup(buttons))
+    await query.message.edit_text("🎯 **Batch Locked! Choose Upload Mode:**\n\n⚡ **AUTOMATIC:** Reads folder tags and auto-sorts.\n➕ **MANUAL:** Single folder dump.", reply_markup=InlineKeyboardMarkup(buttons))
     raise StopPropagation
 
 @Client.on_callback_query(filters.regex("^fbnewmod"), group=-1)
 async def new_mod_btn(client, query):
     user_session[query.from_user.id]["state"] = "waiting_mod_name"
-    await query.message.edit_text("📝 **Type the name for the NEW MODULE:**")
+    await query.message.edit_text("📝 **Enter Name for NEW MODULE:**")
     raise StopPropagation
 
 @Client.on_callback_query(filters.regex("^fbauto_mode"), group=-1)
 async def auto_mode_btn(client, query):
     user_session[query.from_user.id]["state"] = "waiting_first_file_auto"
-    await query.message.edit_text("⚡ **AUTOMATIC MODE ACTIVATED!**\n\n📥 Please **FORWARD** the FIRST FILE from your Channel.")
+    await query.message.edit_text("⚡ **GHOST MODE ACTIVATED!**\n\n📥 Please **FORWARD** the FIRST FILE from the Target Channel.")
     raise StopPropagation
 
 # ==========================================
@@ -202,7 +206,7 @@ async def handle_names(client, message: Message):
             return batch_id
         batch_id = await asyncio.to_thread(create_batch)
         user_session[user_id].update({"batch_id": batch_id})
-        buttons = [[InlineKeyboardButton("⚡ AUTOMATIC (Smart Caption)", callback_data="fbauto_mode")], [InlineKeyboardButton("➕ New Module (Manual)", callback_data="fbnewmod")]]
+        buttons = [[InlineKeyboardButton("⚡ AUTOMATIC (Ghost Mode)", callback_data="fbauto_mode")], [InlineKeyboardButton("➕ New Module (Manual)", callback_data="fbnewmod")]]
         await message.reply_text(f"✅ Batch `{text}` Created!\n\n🎯 **Choose Upload Mode:**", reply_markup=InlineKeyboardMarkup(buttons))
         
     elif state == "waiting_mod_name":
@@ -222,43 +226,38 @@ async def handle_files(client, message: Message):
     state = user_session[user_id]["state"]
     msg_id = message.forward_from_message_id if message.forward_from_message_id else message.id
 
-    if message.forward_from_chat:
-        user_session[user_id]["source_chat"] = message.forward_from_chat.id
-    else:
-        user_session[user_id]["source_chat"] = SOURCE_CHANNEL
-
     if state == "waiting_first_file_auto":
         user_session[user_id].update({"start_id": msg_id, "state": "waiting_last_file_auto"})
-        await message.reply_text(f"🎯 **First File Locked (ID: {msg_id})**\n\n📤 Now **FORWARD** the LAST FILE.")
+        await message.reply_text(f"🎯 **First Payload Locked (ID: {msg_id})**\n\n📤 Now **FORWARD** the LAST FILE.")
         
     elif state == "waiting_last_file_auto":
         user_session[user_id].update({"end_id": msg_id, "state": "processing"})
-        await message.reply_text("🚀 **Initializing Live Dashboard... Please wait!**")
+        await message.reply_text("🖥️ **Initializing System Override...**")
         asyncio.create_task(process_bulk_auto(client, message, user_id))
 
     elif state == "waiting_first_file_manual":
         user_session[user_id].update({"start_id": msg_id, "state": "waiting_last_file_manual"})
-        await message.reply_text(f"🎯 **First File Locked (ID: {msg_id})**\n\n📤 Now **FORWARD** the LAST FILE.")
+        await message.reply_text(f"🎯 **First Payload Locked (ID: {msg_id})**\n\n📤 Now **FORWARD** the LAST FILE.")
         
     elif state == "waiting_last_file_manual":
         user_session[user_id].update({"end_id": msg_id, "state": "processing"})
-        await message.reply_text("🚀 **Initializing Live Dashboard... Please wait!**")
+        await message.reply_text("🖥️ **Initializing System Override...**")
         asyncio.create_task(process_bulk_manual(client, message, user_id))
         
     raise StopPropagation
 
 # ==========================================
-# ⚡ 7. THE BRAIN: LIVE DASHBOARD PROCESSOR (AUTO)
+# ⚡ 7. THE BRAIN: HACKER DASHBOARD (AUTO)
 # ==========================================
 async def process_bulk_auto(client, message, user_id):
     start_id = user_session[user_id]["start_id"]
     end_id = user_session[user_id]["end_id"]
-    source_chat = user_session[user_id]["source_chat"]
+    source_chat = SOURCE_CHANNEL
     
     if start_id > end_id: start_id, end_id = end_id, start_id
     total_files = (end_id - start_id) + 1
         
-    status_msg = await message.reply_text("🔄 **Starting Deep Live Scan...**")
+    status_msg = await message.reply_text("🔄 **Establishing Target Uplink...**")
     cat_id, batch_id = user_session[user_id]["cat_id"], user_session[user_id]["batch_id"]
     
     module_cache = {}
@@ -277,12 +276,14 @@ async def process_bulk_auto(client, message, user_id):
                 messages = await client.get_messages(source_chat, chunk_ids)
             except Exception as e:
                 failed_count += len(chunk_ids)
-                failed_logs.append(f"Channel Error: {str(e)[:30]}")
+                failed_logs.append(f"Uplink Error: {str(e)[:25]}")
                 continue
                 
             for msg in messages:
                 scanned += 1
-                if msg.empty or not getattr(msg, "media", None): continue
+                
+                if msg.empty or not getattr(msg, "media", None):
+                    continue
                 
                 try:
                     direct_link, clean_name = get_stream_url(msg)
@@ -308,43 +309,67 @@ async def process_bulk_auto(client, message, user_id):
                     
                 except Exception as ex:
                     failed_count += 1
-                    failed_logs.append(f"ID {msg.id}: Sync Error")
+                    failed_logs.append(f"ID-{msg.id}: Decryption Failed")
 
                 now = time.time()
                 if now - last_update_time > 2.5:
+                    perc = round((scanned / total_files) * 100, 1) if total_files > 0 else 0
+                    bar = create_progress_bar(scanned, total_files)
+                    
                     ui = (
-                        f"⚡ **LIVE SYNC DASHBOARD**\n━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📊 **Progress:** {scanned} / {total_files} Scanned\n"
-                        f"📂 **Module:** `{mod_name}`\n"
-                        f"📄 **File:** `{clean_name[:20]}...`\n\n"
-                        f"✅ **Added:** {v_count + f_count} (🎬 {v_count} | 📑 {f_count})\n"
-                        f"❌ **Failed:** {failed_count}"
+                        f"🖥️ [ 𝗦𝐘𝗦𝗧𝗘𝗠 𝗢𝗩𝗘𝗥𝗥𝗜𝗗𝗘 : 𝗚𝗛𝗢𝗦𝗧 𝗣𝗥𝗢𝗧𝗢𝗖𝗢𝗟 ] \n"
+                        f"▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n"
+                        f"🌐 Target Uplink  : `Bypassing Host Security... [200 OK]`\n"
+                        f"🛡️ Proxy Route    : `Active (Masking IP: 192.168.x.x)`\n"
+                        f"📂 Target Module  : `{mod_name}`\n\n"
+                        f"[»] 𝗘𝗫𝗧𝗥𝗔𝗖𝗧𝗜𝗡𝗚 𝗣𝗔𝗬𝗟𝗢𝗔𝗗 : `ID-#{msg.id}`\n"
+                        f"📄 `{clean_name[:35]}...`\n"
+                        f"⚡ Status : `Decrypting AES-256 & Injecting to DB... Success`\n\n"
+                        f"📊 𝗖𝗟𝗢𝗡𝗜𝗡𝗚 𝗠𝗘𝗧𝗥𝗜𝗖𝗦 :\n"
+                        f"[{bar}] {perc}%\n"
+                        f"↳ 📦 Extracted : {scanned} / {total_files} Nodes\n\n"
+                        f"💎 𝗦𝗘𝗖𝗨𝗥𝗘𝗗 𝗜𝗡 𝗢𝗙𝗙𝗦𝗛𝗢𝗥𝗘 𝗩𝗔𝗨𝗟𝗧 : [{v_count + f_count}]\n"
+                        f" ├─ 🎬 Decrypted Videos (Lectures) : {v_count}\n"
+                        f" └─ 📑 Ripped Assets (Resources)   : {f_count}\n\n"
+                        f"⚠️ 𝗙𝗜𝗥𝗘𝗪𝗔𝗟𝗟 𝗕𝗟𝗢𝗖𝗞𝗦 / 𝗗𝗘𝗔𝗗 𝗟𝗜𝗡𝗞𝗦 : [{failed_count}]"
                     )
-                    try: await status_msg.edit_text(ui); last_update_time = now
+                    if failed_logs: ui += f"\n └─ 🚫 `{failed_logs[-1]}`"
+                    ui += f"\n\n📡 *Mirroring raw database to anonymous Ghost Server...*"
+                    
+                    try:
+                        await status_msg.edit_text(ui)
+                        last_update_time = now
                     except: pass
                     
         final_ui = (
-            f"✅ **SMART BATCH SYNC COMPLETE!**\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"📂 **Modules Auto-Created:** {len(module_cache)}\n"
-            f"🎬 **Videos (Lectures):** {v_count}\n"
-            f"📑 **Files (Resources):** {f_count}\n"
-            f"❌ **Total Skipped/Failed:** {failed_count}\n\n🔥 *Strictly Organized in Firebase!*"
+            f"🖥️ [ 𝗦𝐘𝗦𝗧𝗘𝗠 𝗢𝗩𝗘𝗥𝗥𝗜𝗗𝗘 : 𝗖𝗢𝗠𝗣𝗟𝗘𝗧𝗘 ]\n"
+            f"▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n"
+            f"🌐 Mission Status : `All Payloads Successfully Pirated [200 OK]`\n"
+            f"📊 𝗙𝗜𝗡𝗔𝗟 𝗛𝗘𝗜𝗦𝗧 𝗠𝗘𝗧𝗥𝗜𝗖𝗦 :\n"
+            f"↳ 📦 Total Scanned : {total_files} Nodes\n"
+            f"↳ 📁 Auto-Created Modules : {len(module_cache)}\n\n"
+            f"💎 𝗦𝗘𝗖𝗨𝗥𝗘𝗗 𝗜𝗡 𝗢𝗙𝗙𝗦𝗛𝗢𝗥𝗘 𝗩𝗔𝗨𝗟𝗧 : [{v_count + f_count}]\n"
+            f" ├─ 🎬 Decrypted Videos (Lectures) : {v_count}\n"
+            f" └─ 📑 Ripped Assets (Resources)   : {f_count}\n\n"
+            f"⚠️ 𝗙𝗜𝗥𝗘𝗪𝗔𝗟𝗟 𝗕𝗟𝗢𝗖𝗞𝗦 / 𝗦𝗞𝗜𝗣𝗣𝗘𝗗 : [{failed_count}]"
         )
         await status_msg.edit_text(final_ui)
         
-    except Exception as e: await status_msg.edit_text(f"❌ **Fatal Error:** {e}")
-    finally: user_session[user_id] = {"state": "idle"}
+    except Exception as e:
+        await status_msg.edit_text(f"❌ **Fatal Error:** {e}")
+    finally:
+        user_session[user_id] = {"state": "idle"}
 
 # ==========================================
 # ⚡ 8. MANUAL PROCESSOR
 # ==========================================
 async def process_bulk_manual(client, message, user_id):
     start_id, end_id = user_session[user_id]["start_id"], user_session[user_id]["end_id"]
-    source_chat = user_session[user_id]["source_chat"]
+    source_chat = SOURCE_CHANNEL
     if start_id > end_id: start_id, end_id = end_id, start_id
     total_files = (end_id - start_id) + 1
     
-    status_msg = await message.reply_text("🔄 **Initializing Live Dashboard...**")
+    status_msg = await message.reply_text("🔄 **Initializing System Override...**")
     cat_id, batch_id, mod_id = user_session[user_id]["cat_id"], user_session[user_id]["batch_id"], user_session[user_id]["mod_id"]
     
     v_count = f_count = failed_count = scanned = 0
@@ -381,10 +406,19 @@ async def process_bulk_manual(client, message, user_id):
 
                 now = time.time()
                 if now - last_update_time > 2.5:
-                    ui = f"⚡ **MANUAL SYNC ({scanned}/{total_files})**\n━━━━━━━━━━━━━━━━━━━━\n📄 `{clean_name[:25]}...`\n✅ Added: {v_count + f_count} (🎬 {v_count} | 📑 {f_count}) | ❌ Failed: {failed_count}"
+                    perc = round((scanned / total_files) * 100, 1) if total_files > 0 else 0
+                    bar = create_progress_bar(scanned, total_files)
+                    ui = (
+                        f"🖥️ [ 𝗦𝐘𝗦𝗧𝗘𝗠 𝗢𝗩𝗘𝗥𝗥𝗜𝗗𝗘 : 𝗠𝗔𝗡𝗨𝗔𝗟 ]\n"
+                        f"▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n"
+                        f"[»] 𝗘𝗫𝗧𝗥𝗔𝗖𝗧𝗜𝗡𝗚 : `ID-#{msg.id}`\n"
+                        f"[{bar}] {perc}%\n\n"
+                        f"💎 Secured: {v_count + f_count} (🎬 {v_count} | 📑 {f_count})\n"
+                        f"⚠️ Errors : {failed_count}"
+                    )
                     try: await status_msg.edit_text(ui); last_update_time = now
                     except: pass
                     
-        await status_msg.edit_text(f"✅ **MANUAL SYNC COMPLETE!**\n🎬 Videos: {v_count} | 📑 Files: {f_count} | ❌ Failed: {failed_count}")
+        await status_msg.edit_text(f"✅ **MANUAL HEIST COMPLETE!**\n🎬 Videos: {v_count} | 📑 Files: {f_count} | ❌ Errors: {failed_count}")
     except Exception as e: await status_msg.edit_text(f"❌ Error: {e}")
     finally: user_session[user_id] = {"state": "idle"}
