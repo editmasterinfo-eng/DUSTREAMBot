@@ -5,15 +5,15 @@ from os import environ
 SESSION = environ.get('SESSION', 'TechVJBot')
 
 # Your Telegram Account Api Id And Api Hash
-API_ID = int(environ.get('API_ID', '22177421'))
-API_HASH = environ.get('API_HASH', 'e515bbf4a302d7c7335f689a52b196a5')
+API_ID = int(environ.get('API_ID', '33720317'))
+API_HASH = environ.get('API_HASH', '145db99951f44490f134ac7446126630')
 
 # Bot Token
 BOT_TOKEN = environ.get('BOT_TOKEN', "")
 
 # --- ADMIN SETUP (FIXED) ---
 # Raw ID from environment
-ADMIN_TXT = environ.get('ADMIN', '1865244712')
+ADMIN_TXT = environ.get('ADMIN', '8692160077')
 
 # 1. ADMIN: Ye purani files ke liye hai (Start.py etc.)
 # Agar multiple IDs hain to ye pehli ID utha lega
