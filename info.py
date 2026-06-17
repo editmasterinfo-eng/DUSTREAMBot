@@ -36,7 +36,7 @@ LOG_CHANNEL = int(environ.get('LOG_CHANNEL', '-1003911500529'))
 MONGODB_URI = environ.get("MONGODB_URI", "")
 
 # Stream Url (Trailing slash removed for safety)
-STREAM_URL = environ.get("STREAM_URL", "https://skillneaststream.onrender.com").rstrip("/")
+STREAM_URL = environ.get("STREAM_URL", "https://dustreambot.onrender.com").rstrip("/")
 
 # Permanent Link
 LINK_URL = environ.get("LINK_URL", "https://skillneast.blogspot.com/p/s_7.html")
