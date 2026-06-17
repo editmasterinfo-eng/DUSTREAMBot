@@ -1,7 +1,4 @@
 # Don't Remove Credit @VJ_Botz
-# Subscribe YouTube Channel For Amazing Bot @Tech_VJ
-# Ask Doubt on telegram @KingVJ01
-
 import re, math, logging, secrets, mimetypes, time
 from info import *
 from aiohttp import web
@@ -23,209 +20,121 @@ html_content = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Welcome to VJ Disk</title>
     <style>
-        body {
-            margin: 0;
-            font-family: 'Arial', sans-serif;
-            background: linear-gradient(135deg, #ff7e5f, #feb47b);
-            color: #fff;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            text-align: center;
-            perspective: 1000px;
-        }
-        
-        .container {
-            transform-style: preserve-3d;
-            animation: rotate 10s infinite linear;
-        }
-
-        @keyframes rotate {
-            from {
-                transform: rotateY(0deg);
-            }
-            to {
-                transform: rotateY(360deg);
-            }
-        }
-
-        h1 {
-            font-size: 4em;
-            text-shadow: 2px 2px 10px rgba(0, 0, 0, 0.5);
-        }
-
-        p {
-            font-size: 1.5em;
-            margin-top: 20px;
-            text-shadow: 1px 1px 5px rgba(0, 0, 0, 0.5);
-        }
-
-        .button {
-            margin-top: 30px;
-            padding: 15px 30px;
-            font-size: 1.2em;
-            background-color: #4CAF50; /* Green */
-            border: none;
-            border-radius: 5px;
-            color: white;
-            cursor: pointer;
-            transition: background-color 0.3s ease;
-        }
-
-        .button:hover {
-            background-color: #45a049; /* Darker green */
-        }
+        body { margin: 0; font-family: 'Arial', sans-serif; background: linear-gradient(135deg, #ff7e5f, #feb47b); color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; text-align: center; }
+        h1 { font-size: 4em; text-shadow: 2px 2px 10px rgba(0,0,0,0.5); }
+        p { font-size: 1.5em; margin-top: 20px; }
+        .button { margin-top: 30px; padding: 15px 30px; font-size: 1.2em; background-color: #4CAF50; border: none; border-radius: 5px; color: white; cursor: pointer; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Welcome To VJ Disk!</h1>
-        <p>Your ultimate destination for streaming and sharing videos!</p>
-        <p>Explore a world of entertainment at your fingertips.</p>
-        <button class="button" onclick="alert('Explore Now!')">Get Started</button>
+        <h1>Welcome To VJ Disk!</h1><p>Your ultimate destination for streaming!</p>
     </div>
 </body>
 </html>
 """
 
+# 1. ROOT ROUTE
 @routes.get("/", allow_head=True)
 async def root_route_handler(request):
     return web.Response(text=html_content, content_type='text/html')
 
-@routes.get("/stream/{message_id}")
-async def stream_handler_rotation(request):
-    try:
-        message_id = int(request.match_info['message_id'])
-        return await media_streamer(request, message_id, "")
-    except ValueError:
-        return web.Response(status=400, text="Invalid Message ID (Must be a number)")
-    except Exception as e:
-        logging.error(f"Stream Error: {e}")
-        return web.Response(status=500, text="Server Error")
-
-@routes.get(r"/{path}/{user_path}/{second}/{third}", allow_head=True)
-async def stream_handler(request: web.Request):
-    try:
-        path = request.match_info["path"]
-        user_path = request.match_info["user_path"]
-        sec = request.match_info["second"]
-        th = request.match_info["third"]
-        id = int(await decode(path))
-        user_id = int(await decode(user_path))
-        secid = int(await decode(sec))
-        thid = int(await decode(th))
-        return web.Response(text=await render_page(id, user_id, secid, thid), content_type='text/html')
-    except Exception as e:
-        return web.Response(text=html_content, content_type='text/html')
-    return 
-
+# 2. CLICK COUNTER
 @routes.post('/click-counter')
 async def handle_click(request):
     try:
         data = await request.json()
         user_id = int(data.get('user_id'))
         today = datetime.now().strftime('%Y-%m-%d')
-
         user_agent = request.headers.get('User-Agent')
-        is_chrome = "Chrome" in user_agent or "Google Inc" in user_agent
-
-        if is_chrome:
-            visited_cookie = request.cookies.get('visited')
-        else:
-            return
-
-        if visited_cookie == today:
-            return
-        else:
+        if "Chrome" in user_agent or "Google Inc" in user_agent:
+            if request.cookies.get('visited') == today: return
             response = web.Response(text="Hello, World!")
             response.set_cookie('visited', today, max_age=24*60*60)
             u = get_count(user_id)
-            if u:
-                c = int(u + 1)
-                record_visit(user_id, c)
-            else:
-                c = int(1)
-                record_visit(user_id, c)
+            record_visit(user_id, int(u + 1) if u else 1)
             return response
-    except:
-        pass
+    except: pass
 
+# 3. LINK GENERATOR ROUTE
+@routes.get('/link', allow_head=True)
+async def visits(request: web.Request):
+    user, watch, second, third = request.query.get('u'), request.query.get('w'), request.query.get('s'), request.query.get('t')
+    data, user_id, sec_id, th_id = await encode(watch), await encode(user), await encode(second), await encode(third)
+    base_url = STREAM_URL.rstrip('/')
+    raise web.HTTPFound(f"{base_url}/{data}/{user_id}/{sec_id}/{th_id}")
+
+# 4. 🔥 MASTER DOWNLOAD ROUTE (Fixes 404 routing conflict completely)
+@routes.get(r"/dl/{path:.*}", allow_head=True)
+async def stream_handler_master(request: web.Request):
+    try:
+        path = request.match_info["path"]
+        id_match = re.search(r"(\d+)", path)
+        if not id_match:
+            return web.Response(status=404, text="404 Error: Invalid Link, Message ID not found in URL.")
+        
+        message_id = int(id_match.group(1))
+        secure_hash = request.rel_url.query.get("hash", "")
+        return await media_streamer(request, message_id, secure_hash)
+    except FIleNotFound as e:
+        return web.Response(status=404, text=f"404 Error: File not found in Telegram! Please ensure Bot is Admin in Log Channel and the video was not deleted. Details: {e.message}")
+    except Exception as e:
+        return web.Response(status=500, text=f"Server Error: {str(e)}")
+
+# 5. 🔥 STREAM ROUTE
+@routes.get(r"/stream/{path:.*}", allow_head=True)
+async def stream_handler_rotation(request):
+    try:
+        path = request.match_info["path"]
+        id_match = re.search(r"(\d+)", path)
+        if not id_match:
+            return web.Response(status=404, text="404 Error: Invalid Stream ID.")
+        message_id = int(id_match.group(1))
+        return await media_streamer(request, message_id, "")
+    except FIleNotFound as e:
+        return web.Response(status=404, text=f"404 Error: Telegram File Missing! {e.message}")
+    except Exception as e:
+        return web.Response(status=500, text=f"Server Error: {str(e)}")
+
+# 6. WATCH ONLINE PAGE RENDER ROUTE
+@routes.get(r"/{path}/{user_path}/{second}/{third}", allow_head=True)
+async def stream_handler(request: web.Request):
+    try:
+        id = int(await decode(request.match_info["path"]))
+        user_id = int(await decode(request.match_info["user_path"]))
+        secid = int(await decode(request.match_info["second"]))
+        thid = int(await decode(request.match_info["third"]))
+        return web.Response(text=await render_page(id, user_id, secid, thid), content_type='text/html')
+    except: return web.Response(text=html_content, content_type='text/html')
+
+# 7. SHORT LINK ROUTE (Hamesha Last me hona chahiye taaki `/dl/` block na ho)
 @routes.get('/{short_link}', allow_head=True)
 async def get_original(request: web.Request):
     short_link = request.match_info["short_link"]
     original = await decode(short_link)
     if original:
         base_url = STREAM_URL.rstrip('/')
-        link = f"{base_url}/link?{original}"
-        raise web.HTTPFound(link)
+        raise web.HTTPFound(f"{base_url}/link?{original}")
     else:
         return web.Response(text=html_content, content_type='text/html')
 
-@routes.get('/link', allow_head=True)
-async def visits(request: web.Request):
-    user = request.query.get('u')
-    watch = request.query.get('w')
-    second = request.query.get('s')
-    third = request.query.get('t')
-    data = await encode(watch)
-    user_id = await encode(user)
-    sec_id = await encode(second)
-    th_id = await encode(third)
-    base_url = STREAM_URL.rstrip('/')
-    link = f"{base_url}/{data}/{user_id}/{sec_id}/{th_id}"
-    raise web.HTTPFound(link)
-
-# 🔥 FIX: \S+ Changed to .+ to support spaces & safe regex logic added
-@routes.get(r"/dl/{path:.+}", allow_head=True)
-async def stream_handler_legacy(request: web.Request):
-    try:
-        path = request.match_info["path"]
-        match = re.search(r"^([a-zA-Z0-9_-]{6})(\d+)$", path)
-        if match:
-            secure_hash = match.group(1)
-            id = int(match.group(2))
-        else:
-            id = int(re.search(r"^(\d+)", path).group(1))
-            secure_hash = request.rel_url.query.get("hash")
-        return await media_streamer(request, id, secure_hash)
-    except InvalidHash as e:
-        raise web.HTTPForbidden(text=e.message)
-    except FIleNotFound as e:
-        raise web.HTTPNotFound(text=e.message)
-    except (AttributeError, BadStatusLine, ConnectionResetError):
-        pass
-    except Exception as e:
-        logging.critical(e.with_traceback(None))
-        raise web.HTTPInternalServerError(text=str(e))
-
+# === MEDIA STREAMER LOGIC ===
 class_cache = {}
-
 async def media_streamer(request: web.Request, id: int, secure_hash: str):
     range_header = request.headers.get("Range", 0)
-    
     index = min(work_loads, key=work_loads.get)
     faster_client = multi_clients[index]
     
-    if MULTI_CLIENT:
-        logging.info(f"Client {index} is now serving {request.remote}")
-
     if faster_client in class_cache:
         tg_connect = class_cache[faster_client]
-        logging.debug(f"Using cached ByteStreamer object for client {index}")
     else:
-        logging.debug(f"Creating new ByteStreamer object for client {index}")
         tg_connect = ByteStreamer(faster_client)
         class_cache[faster_client] = tg_connect
-    logging.debug("before calling get_file_properties")
-    
+        
     file_id = await tg_connect.get_file_properties(id)
-    logging.debug("after calling get_file_properties")
-    
     file_size = file_id.file_size
 
     if range_header:
@@ -237,41 +146,19 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
         until_bytes = (request.http_range.stop or file_size) - 1
 
     if (until_bytes > file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
-        return web.Response(
-            status=416,
-            body="416: Range not satisfiable",
-            headers={"Content-Range": f"bytes */{file_size}"},
-        )
+        return web.Response(status=416, body="416: Range not satisfiable", headers={"Content-Range": f"bytes */{file_size}"})
 
     chunk_size = 1024 * 1024
     until_bytes = min(until_bytes, file_size - 1)
-
     offset = from_bytes - (from_bytes % chunk_size)
     first_part_cut = from_bytes - offset
     last_part_cut = until_bytes % chunk_size + 1
-
     req_length = until_bytes - from_bytes + 1
     part_count = math.ceil(until_bytes / chunk_size) - math.floor(offset / chunk_size)
-    body = tg_connect.yield_file(
-        file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size
-    )
-
-    mime_type = file_id.mime_type
-    file_name = file_id.file_name
-    disposition = "attachment"
-
-    if mime_type:
-        if not file_name:
-            try:
-                file_name = f"{secrets.token_hex(2)}.{mime_type.split('/')[1]}"
-            except (IndexError, AttributeError):
-                file_name = f"{secrets.token_hex(2)}.unknown"
-    else:
-        if file_name:
-            mime_type = mimetypes.guess_type(file_id.file_name)
-        else:
-            mime_type = "application/octet-stream"
-            file_name = f"{secrets.token_hex(2)}.unknown"
+    
+    body = tg_connect.yield_file(file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size)
+    mime_type = file_id.mime_type or mimetypes.guess_type(file_id.file_name or "")[0] or "application/octet-stream"
+    file_name = file_id.file_name or f"{secrets.token_hex(2)}.unknown"
 
     return web.Response(
         status=206 if range_header else 200,
@@ -280,7 +167,7 @@ async def media_streamer(request: web.Request, id: int, secure_hash: str):
             "Content-Type": f"{mime_type}",
             "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
             "Content-Length": str(req_length),
-            "Content-Disposition": f'{disposition}; filename="{file_name}"',
+            "Content-Disposition": f'attachment; filename="{file_name}"',
             "Accept-Ranges": "bytes",
         },
     )
