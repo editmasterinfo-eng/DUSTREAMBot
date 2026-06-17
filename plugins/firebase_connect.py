@@ -31,7 +31,7 @@ db = firebase.database()
 user_session = {}
 
 # ==========================================
-# 🛠️ 2. HELPERS & STREAM LINK LOGIC
+# 🛠️ 2. HELPERS & THREAD-SAFE FIREBASE LOGIC
 # ==========================================
 def get_name(data):
     if not data: return "Unnamed"
@@ -49,14 +49,16 @@ def get_file_name_robust(message):
 def get_stream_url(msg):
     file_name = get_file_name_robust(msg)
     clean_name = file_name.replace("_", " ").replace("-", " ")
+    safe_filename = urllib.parse.quote_plus(file_name)
     
-    # 🔥 THE 404 FIX: Strict Aiohttp routing (Removed filename from URL)
+    # 🔥 FINAL 404 FIX: Added /dl/ precisely for DUSTREAMBot aiohttp router
     base_url = STREAM_URL.rstrip('/')
-    direct_link = f"{base_url}/{msg.id}" 
+    direct_link = f"{base_url}/dl/{msg.id}/{safe_filename}"
     
     return direct_link, clean_name
 
 def extract_module_name(caption):
+    """Extract exact subfolder name from caption"""
     if not caption: return "Main Module"
     match = re.search(r'/folder\s+([^\n]+)', caption)
     if match:
@@ -72,7 +74,7 @@ def create_progress_bar(scanned, total, length=16):
     empty = length - filled
     return "█" * filled + "░" * empty
 
-# 🔥 THREAD-SAFE FIREBASE FUNCTIONS
+# 🔥 STRICT THREAD-SAFE PATHS (0% Chance of Root Dumping)
 def fb_create_module(cat_id, batch_id, mod_name):
     path_str = f"categories/{cat_id}/batches/{batch_id}/modules"
     ref = db.child(path_str).push({"name": mod_name, "id": ""})
@@ -113,7 +115,7 @@ async def new_cmd(client, message: Message):
                 if v and isinstance(v, dict): buttons.append([InlineKeyboardButton(f"📂 {get_name(v)}", callback_data=f"fbcat_{k}")])
         buttons.append([InlineKeyboardButton("➕ Create New Category", callback_data="fbnewcat")])
         buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")])
-        await message.reply_text("🔥 **Ghost Protocol Syncer Started!**\n\n**Step 1:** Select Category:", reply_markup=InlineKeyboardMarkup(buttons))
+        await message.reply_text("🖥️ **Ghost Protocol Syncer Started!**\n\n**Step 1:** Select Category:", reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
         await message.reply_text(f"Database Error: {e}")
     raise StopPropagation
@@ -269,6 +271,7 @@ async def process_bulk_auto(client, message, user_id):
     timestamp_base = int(time.time() * 1000)
     last_update_time = time.time()
     
+    # 🔥 EXTENSION FILTER
     video_exts = ['.mp4', '.mkv', '.avi', '.webm', '.mov', '.flv', '.wmv', '.m4v']
     all_ids = list(range(start_id, end_id + 1))
     
@@ -296,6 +299,7 @@ async def process_bulk_auto(client, message, user_id):
                         module_cache[mod_name] = mod_id
                     
                     mod_id = module_cache[mod_name]
+                    
                     file_name_lower = get_file_name_robust(msg).lower()
                     is_video = False
                     if getattr(msg, "video", None): is_video = True
