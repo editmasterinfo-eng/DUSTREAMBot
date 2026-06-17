@@ -12,7 +12,7 @@ from info import ADMINS
 # ⚙️ 1. CONFIGURATION
 # ==========================================
 SOURCE_CHANNEL = -1003897025049  
-STREAM_URL = "https://dustreambot.onrender.com"
+STREAM_URL = "https://skillneaststream.onrender.com"
 
 firebaseConfig = {
     "apiKey": "AIzaSyBhMItJzgDtMmwLesBqs1mUzna3-0WD8Rk",
@@ -53,7 +53,7 @@ def get_stream_url(msg):
 # ==========================================
 async def check_state(_, __, m):
     state = user_session.get(m.from_user.id, {}).get("state", "")
-    return bool(state in ["waiting_batch_name", "waiting_mod_name"])
+    return bool(state in ["waiting_cat_name", "waiting_batch_name", "waiting_mod_name"])
 
 async def check_files(_, __, m):
     state = user_session.get(m.from_user.id, {}).get("state", "")
@@ -73,9 +73,14 @@ async def new_cmd(client, message: Message):
         buttons = []
         if cats:
             for k, v in cats.items():
-                if v: buttons.append([InlineKeyboardButton(f"📂 {get_name(v)}", callback_data=f"fbcat_{k}")])
+                if v and isinstance(v, dict): 
+                    buttons.append([InlineKeyboardButton(f"📂 {get_name(v)}", callback_data=f"fbcat_{k}")])
+        
+        # 🔥 FIX: Added "Create New Category" Button
+        buttons.append([InlineKeyboardButton("➕ Create New Category", callback_data="fbnewcat")])
         buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")])
-        await message.reply_text("🔥 **Auto-Bulk Sync Started!**\n\n**Step 1:** Select a Category from Firebase:", reply_markup=InlineKeyboardMarkup(buttons))
+        
+        await message.reply_text("🔥 **Auto-Bulk Sync Started!**\n\n**Step 1:** Select a Category or Create New:", reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
         await message.reply_text(f"Database Error: {e}")
     raise StopPropagation
@@ -84,6 +89,13 @@ async def new_cmd(client, message: Message):
 async def cancel_cb(client, query):
     user_session[query.from_user.id] = {"state": "idle"}
     await query.message.edit_text("🚫 **Process Cancelled.**")
+    raise StopPropagation
+
+# 🔥 ADDED: Handler for New Category Button
+@Client.on_callback_query(filters.regex("^fbnewcat"), group=-1)
+async def new_cat_btn(client, query):
+    user_session[query.from_user.id]["state"] = "waiting_cat_name"
+    await query.message.edit_text("📝 **Type the name for the NEW CATEGORY:**")
     raise StopPropagation
 
 @Client.on_callback_query(filters.regex("^fbcat_"), group=-1)
@@ -95,7 +107,8 @@ async def sel_cat(client, query):
         buttons = []
         if batches:
             for k, v in batches.items():
-                if v: buttons.append([InlineKeyboardButton(f"🎬 {get_name(v)}", callback_data=f"fbbatch_{k}")])
+                if v and isinstance(v, dict): 
+                    buttons.append([InlineKeyboardButton(f"🎬 {get_name(v)}", callback_data=f"fbbatch_{k}")])
         buttons.append([InlineKeyboardButton("➕ Create New Batch", callback_data="fbnewbatch")])
         buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")])
         await query.message.edit_text("**Step 2:** Select a Batch or Create New:", reply_markup=InlineKeyboardMarkup(buttons))
@@ -112,7 +125,8 @@ async def sel_batch(client, query):
         buttons = []
         if mods:
             for k, v in mods.items():
-                if v: buttons.append([InlineKeyboardButton(f"📺 {get_name(v)}", callback_data=f"fbmod_{k}")])
+                if v and isinstance(v, dict): 
+                    buttons.append([InlineKeyboardButton(f"📺 {get_name(v)}", callback_data=f"fbmod_{k}")])
         buttons.append([InlineKeyboardButton("➕ Create New Module", callback_data="fbnewmod")])
         buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")])
         await query.message.edit_text("**Step 3:** Select a Module or Create New:", reply_markup=InlineKeyboardMarkup(buttons))
@@ -139,16 +153,29 @@ async def sel_mod(client, query):
     raise StopPropagation
 
 # ==========================================
-# ✍️ 4. TEXT HANDLER (CREATE BATCH/MODULE IN DB)
+# ✍️ 4. TEXT HANDLER (CREATE CAT/BATCH/MOD IN DB)
 # ==========================================
 @Client.on_message(filters.text & filters.private & state_filter, group=-1)
 async def handle_names(client, message: Message):
     user_id = message.from_user.id
     state = user_session[user_id]["state"]
     text = message.text.strip()
-    cat_id = user_session[user_id]["cat_id"]
     
-    if state == "waiting_batch_name":
+    # 🔥 Logic for New Category
+    if state == "waiting_cat_name":
+        ref = db.child("categories").push({"title": text, "id": ""})
+        cat_id = ref['name']
+        db.child("categories").child(cat_id).update({"id": cat_id})
+        
+        user_session[user_id].update({"cat_id": cat_id, "state": "selecting_batch"})
+        buttons = [
+            [InlineKeyboardButton("➕ Create New Batch", callback_data="fbnewbatch")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="fbcancel")]
+        ]
+        await message.reply_text(f"✅ Category `{text}` Created!\n\n**Step 2:** Select or Create a Batch inside it:", reply_markup=InlineKeyboardMarkup(buttons))
+        
+    elif state == "waiting_batch_name":
+        cat_id = user_session[user_id]["cat_id"]
         ref = db.child("categories").child(cat_id).child("batches").push({"title": text, "id": ""})
         batch_id = ref['name']
         db.child("categories").child(cat_id).child("batches").child(batch_id).update({"id": batch_id})
@@ -157,6 +184,7 @@ async def handle_names(client, message: Message):
         await message.reply_text(f"✅ Batch `{text}` Created!\n\n📝 **Now type the name for the NEW MODULE inside this batch:**")
         
     elif state == "waiting_mod_name":
+        cat_id = user_session[user_id]["cat_id"]
         batch_id = user_session[user_id]["batch_id"]
         ref = db.child("categories").child(cat_id).child("batches").child(batch_id).child("modules").push({"name": text, "id": ""})
         mod_id = ref['name']
@@ -216,12 +244,10 @@ async def process_bulk_data(client, message, start_id, end_id, user_id):
                 scanned += 1
                 direct_link, clean_name = get_stream_url(msg)
                 
-                # 🔥 APP LOGIC: Video -> Lectures | PDFs/Docs -> Resources
                 target_node = "lectures" if msg.video else "resources"
                 if msg.video: v_count += 1
                 else: f_count += 1
                 
-                # EXACT PAYLOAD MATCHING YOUR SCREENSHOT
                 payload = {
                     "name": clean_name,
                     "link": direct_link,
