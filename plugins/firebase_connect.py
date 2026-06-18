@@ -31,7 +31,7 @@ db = firebase.database()
 user_session = {}
 
 # ==========================================
-# 🛠️ 2. HELPERS & THREAD-SAFE FIREBASE LOGIC
+# 🛠️ 2. HELPERS & NESTED FIREBASE LOGIC
 # ==========================================
 def get_name(data):
     if not data: return "Unnamed"
@@ -49,43 +49,59 @@ def get_file_name_robust(message):
 def get_stream_url(msg):
     file_name = get_file_name_robust(msg)
     clean_name = file_name.replace("_", " ").replace("-", " ")
-    safe_filename = urllib.parse.quote_plus(file_name)
+    safe_filename = urllib.parse.quote(file_name)
     
-    # 🔥 FINAL 404 FIX: Added /dl/ precisely for DUSTREAMBot aiohttp router
     base_url = STREAM_URL.rstrip('/')
     direct_link = f"{base_url}/dl/{msg.id}/{safe_filename}"
     
     return direct_link, clean_name
 
-def extract_module_name(caption):
-    """Extract exact subfolder name from caption"""
-    if not caption: return "Main Module"
+def extract_module_path(caption):
+    """🔥 NEW: Extract full hierarchy path from caption"""
+    if not caption: return ["Main Module"]
     match = re.search(r'/folder\s+([^\n]+)', caption)
     if match:
         path = match.group(1).strip()
+        # Slit by '/' and keep all nested sub-folder names
         parts = [p.strip() for p in path.split('/') if p.strip()]
-        if len(parts) > 0:
-            return parts[-1]
-    return "Main Module"
+        if parts: return parts
+    return ["Main Module"]
 
 def create_progress_bar(scanned, total, length=16):
     if total == 0: return "░" * length
     filled = int((scanned / total) * length)
-    empty = length - filled
-    return "█" * filled + "░" * empty
+    return "█" * filled + "░" * (length - filled)
 
-# 🔥 STRICT THREAD-SAFE PATHS (0% Chance of Root Dumping)
-def fb_create_module(cat_id, batch_id, mod_name):
-    path_str = f"categories/{cat_id}/batches/{batch_id}/modules"
-    ref = db.child(path_str).push({"name": mod_name, "id": ""})
-    mod_id = ref['name']
-    db.child(f"{path_str}/{mod_id}").update({"id": mod_id})
-    return mod_id
+# 🔥 NESTED FOLDER CREATOR (Creates module inside module inside module...)
+def fb_get_or_create_nested_path(cat_id, batch_id, folder_parts):
+    # Strictly starts inside the selected Batch!
+    curr_path = f"categories/{cat_id}/batches/{batch_id}"
+    
+    for part in folder_parts:
+        curr_path = f"{curr_path}/modules"
+        existing = db.child(curr_path).get().val() or {}
+        
+        found_id = None
+        for k, v in existing.items():
+            if isinstance(v, dict) and (v.get("name") == part or v.get("title") == part):
+                found_id = k
+                break
+        
+        if not found_id:
+            ref = db.child(curr_path).push({"name": part, "id": ""})
+            found_id = ref['name']
+            db.child(f"{curr_path}/{found_id}").update({"id": found_id})
+            
+        # Move deeper into this specific module/submodule
+        curr_path = f"{curr_path}/{found_id}"
+        
+    return curr_path
 
-def fb_push_file(cat_id, batch_id, mod_id, target_node, payload):
-    path_str = f"categories/{cat_id}/batches/{batch_id}/modules/{mod_id}/{target_node}"
-    file_ref = db.child(path_str).push(payload)
-    db.child(f"{path_str}/{file_ref['name']}").update({"id": file_ref['name']})
+def fb_push_file(target_path, target_node, payload):
+    """Pushes Lecture/Resource to the exact deepest folder path"""
+    full_path = f"{target_path}/{target_node}"
+    file_ref = db.child(full_path).push(payload)
+    db.child(f"{full_path}/{file_ref['name']}").update({"id": file_ref['name']})
 
 # ==========================================
 # 🛡️ 3. VIP TRACK FILTERS
@@ -216,8 +232,9 @@ async def handle_names(client, message: Message):
         
     elif state == "waiting_mod_name":
         cat_id, batch_id = user_session[user_id]["cat_id"], user_session[user_id]["batch_id"]
-        mod_id = await asyncio.to_thread(fb_create_module, cat_id, batch_id, text)
-        user_session[user_id].update({"mod_id": mod_id, "state": "waiting_first_file_manual"})
+        # Treat manual input as a single main module
+        target_path = await asyncio.to_thread(fb_get_or_create_nested_path, cat_id, batch_id, [text])
+        user_session[user_id].update({"target_path": target_path, "state": "waiting_first_file_manual"})
         await message.reply_text(f"✅ Module `{text}` Created!\n\n📥 **Please FORWARD the FIRST FILE of this module.**")
     
     raise StopPropagation
@@ -292,13 +309,16 @@ async def process_bulk_auto(client, message, user_id):
                 
                 try:
                     direct_link, clean_name = get_stream_url(msg)
-                    mod_name = extract_module_name(msg.caption)
                     
-                    if mod_name not in module_cache:
-                        mod_id = await asyncio.to_thread(fb_create_module, cat_id, batch_id, mod_name)
-                        module_cache[mod_name] = mod_id
+                    # 🔥 NEW HIERARCHY LOGIC 
+                    mod_parts = extract_module_path(msg.caption)
+                    path_key = tuple(mod_parts) # Use tuple for caching
                     
-                    mod_id = module_cache[mod_name]
+                    if path_key not in module_cache:
+                        target_path = await asyncio.to_thread(fb_get_or_create_nested_path, cat_id, batch_id, mod_parts)
+                        module_cache[path_key] = target_path
+                    
+                    target_path = module_cache[path_key]
                     
                     file_name_lower = get_file_name_robust(msg).lower()
                     is_video = False
@@ -310,7 +330,10 @@ async def process_bulk_auto(client, message, user_id):
                     else: f_count += 1
                     
                     payload = {"name": clean_name, "link": direct_link, "order": timestamp_base + scanned, "thumbnail": ""}
-                    await asyncio.to_thread(fb_push_file, cat_id, batch_id, mod_id, target_node, payload)
+                    await asyncio.to_thread(fb_push_file, target_path, target_node, payload)
+                    
+                    # Formatting folder name for printing in Telegram
+                    display_folder = " ❯ ".join(mod_parts)
                     
                 except Exception as ex:
                     failed_count += 1
@@ -325,11 +348,10 @@ async def process_bulk_auto(client, message, user_id):
                         f"🖥️ [ 𝗦𝐘𝗦𝗧𝗘𝗠 𝗢𝗩𝗘𝗥𝗥𝗜𝗗𝗘 : 𝗚𝗛𝗢𝗦𝗧 𝗣𝗥𝗢𝗧𝗢𝗖𝗢𝗟 ] \n"
                         f"▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n"
                         f"🌐 Target Uplink  : `Bypassing Host Security... [200 OK]`\n"
-                        f"🛡️ Proxy Route    : `Active (Masking IP: 192.168.x.x)`\n"
-                        f"📂 Target Module  : `{mod_name}`\n\n"
+                        f"📂 Active Path    : `{display_folder}`\n\n"
                         f"[»] 𝗘𝗫𝗧𝗥𝗔𝗖𝗧𝗜𝗡𝗚 𝗣𝗔𝗬𝗟𝗢𝗔𝗗 : `ID-#{msg.id}`\n"
                         f"📄 `{clean_name[:35]}...`\n"
-                        f"⚡ Status : `Decrypting AES-256 & Injecting to DB... Success`\n\n"
+                        f"⚡ Target Node    : `{target_node.capitalize()}`\n\n"
                         f"📊 𝗖𝗟𝗢𝗡𝗜𝗡𝗚 𝗠𝗘𝗧𝗥𝗜𝗖𝗦 :\n"
                         f"[{bar}] {perc}%\n"
                         f"↳ 📦 Extracted : {scanned} / {total_files} Nodes\n\n"
@@ -339,7 +361,6 @@ async def process_bulk_auto(client, message, user_id):
                         f"⚠️ 𝗙𝗜𝗥𝗘𝗪𝗔𝗟𝗟 𝗕𝗟𝗢𝗖𝗞𝗦 / 𝗗𝗘𝗔𝗗 𝗟𝗜𝗡𝗞𝗦 : [{failed_count}]"
                     )
                     if failed_logs: ui += f"\n └─ 🚫 `{failed_logs[-1]}`"
-                    ui += f"\n\n📡 *Mirroring raw database to anonymous Ghost Server...*"
                     
                     try: await status_msg.edit_text(ui); last_update_time = now
                     except: pass
@@ -350,7 +371,7 @@ async def process_bulk_auto(client, message, user_id):
             f"🌐 Mission Status : `All Payloads Successfully Pirated [200 OK]`\n"
             f"📊 𝗙𝗜𝗡𝗔𝗟 𝗛𝗘𝗜𝗦𝗧 𝗠𝗘𝗧𝗥𝗜𝗖𝗦 :\n"
             f"↳ 📦 Total Scanned : {total_files} Nodes\n"
-            f"↳ 📁 Auto-Created Modules : {len(module_cache)}\n\n"
+            f"↳ 📁 Auto-Created Nested Folders : {len(module_cache)}\n\n"
             f"💎 𝗦𝗘𝗖𝗨𝗥𝗘𝗗 𝗜𝗡 𝗢𝗙𝗙𝗦𝗛𝗢𝗥𝗘 𝗩𝗔𝗨𝗟𝗧 : [{v_count + f_count}]\n"
             f" ├─ 🎬 Decrypted Videos (Lectures) : {v_count}\n"
             f" └─ 📑 Ripped Assets (Resources)   : {f_count}\n\n"
@@ -371,7 +392,7 @@ async def process_bulk_manual(client, message, user_id):
     total_files = (end_id - start_id) + 1
     
     status_msg = await message.reply_text("🔄 **Initializing System Override...**")
-    cat_id, batch_id, mod_id = user_session[user_id]["cat_id"], user_session[user_id]["batch_id"], user_session[user_id]["mod_id"]
+    target_path = user_session[user_id]["target_path"]
     
     v_count = f_count = failed_count = scanned = 0
     timestamp_base = int(time.time() * 1000)
@@ -402,7 +423,7 @@ async def process_bulk_manual(client, message, user_id):
                     else: f_count += 1
                     
                     payload = {"name": clean_name, "link": direct_link, "order": timestamp_base + scanned, "thumbnail": ""}
-                    await asyncio.to_thread(fb_push_file, cat_id, batch_id, mod_id, target_node, payload)
+                    await asyncio.to_thread(fb_push_file, target_path, target_node, payload)
                 except: failed_count += 1
 
                 now = time.time()
