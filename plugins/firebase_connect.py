@@ -46,59 +46,53 @@ def get_file_name_robust(message):
     if message.caption: return message.caption[:30] + ".mp4"
     return f"File_{message.id}.mp4"
 
+def get_file_size(message):
+    if message.video and getattr(message.video, 'file_size', None): return message.video.file_size
+    if message.document and getattr(message.document, 'file_size', None): return message.document.file_size
+    if message.audio and getattr(message.audio, 'file_size', None): return message.audio.file_size
+    return 0
+
 def get_stream_url(msg):
     file_name = get_file_name_robust(msg)
     clean_name = file_name.replace("_", " ").replace("-", " ")
     safe_filename = urllib.parse.quote(file_name)
-    
     base_url = STREAM_URL.rstrip('/')
     direct_link = f"{base_url}/dl/{msg.id}/{safe_filename}"
-    
     return direct_link, clean_name
 
 def extract_module_path(caption):
-    """🔥 NEW: Extract full hierarchy path from caption"""
-    if not caption: return ["Main Module"]
+    """🔥 NEW: Returns None if no tag, so the bot remembers the previous folder"""
+    if not caption: return None
     match = re.search(r'/folder\s+([^\n]+)', caption)
     if match:
         path = match.group(1).strip()
-        # Slit by '/' and keep all nested sub-folder names
         parts = [p.strip() for p in path.split('/') if p.strip()]
         if parts: return parts
-    return ["Main Module"]
+    return None
 
 def create_progress_bar(scanned, total, length=16):
     if total == 0: return "░" * length
     filled = int((scanned / total) * length)
     return "█" * filled + "░" * (length - filled)
 
-# 🔥 NESTED FOLDER CREATOR (Creates module inside module inside module...)
 def fb_get_or_create_nested_path(cat_id, batch_id, folder_parts):
-    # Strictly starts inside the selected Batch!
     curr_path = f"categories/{cat_id}/batches/{batch_id}"
-    
     for part in folder_parts:
         curr_path = f"{curr_path}/modules"
         existing = db.child(curr_path).get().val() or {}
-        
         found_id = None
         for k, v in existing.items():
             if isinstance(v, dict) and (v.get("name") == part or v.get("title") == part):
                 found_id = k
                 break
-        
         if not found_id:
             ref = db.child(curr_path).push({"name": part, "id": ""})
             found_id = ref['name']
             db.child(f"{curr_path}/{found_id}").update({"id": found_id})
-            
-        # Move deeper into this specific module/submodule
         curr_path = f"{curr_path}/{found_id}"
-        
     return curr_path
 
 def fb_push_file(target_path, target_node, payload):
-    """Pushes Lecture/Resource to the exact deepest folder path"""
     full_path = f"{target_path}/{target_node}"
     file_ref = db.child(full_path).push(payload)
     db.child(f"{full_path}/{file_ref['name']}").update({"id": file_ref['name']})
@@ -232,7 +226,6 @@ async def handle_names(client, message: Message):
         
     elif state == "waiting_mod_name":
         cat_id, batch_id = user_session[user_id]["cat_id"], user_session[user_id]["batch_id"]
-        # Treat manual input as a single main module
         target_path = await asyncio.to_thread(fb_get_or_create_nested_path, cat_id, batch_id, [text])
         user_session[user_id].update({"target_path": target_path, "state": "waiting_first_file_manual"})
         await message.reply_text(f"✅ Module `{text}` Created!\n\n📥 **Please FORWARD the FIRST FILE of this module.**")
@@ -288,7 +281,9 @@ async def process_bulk_auto(client, message, user_id):
     timestamp_base = int(time.time() * 1000)
     last_update_time = time.time()
     
-    # 🔥 EXTENSION FILTER
+    # 🔥 SMART MEMORY: Keeps track of the last seen folder path
+    last_mod_parts = ["Main Module"]
+    
     video_exts = ['.mp4', '.mkv', '.avi', '.webm', '.mov', '.flv', '.wmv', '.m4v']
     all_ids = list(range(start_id, end_id + 1))
     
@@ -304,18 +299,20 @@ async def process_bulk_auto(client, message, user_id):
                 
             for msg in messages:
                 scanned += 1
-                
                 if msg.empty or not getattr(msg, "media", None): continue
                 
                 try:
                     direct_link, clean_name = get_stream_url(msg)
                     
-                    # 🔥 NEW HIERARCHY LOGIC 
-                    mod_parts = extract_module_path(msg.caption)
-                    path_key = tuple(mod_parts) # Use tuple for caching
+                    # 🔥 SMART HIERARCHY LOGIC 
+                    new_mod_parts = extract_module_path(msg.caption)
+                    if new_mod_parts:
+                        last_mod_parts = new_mod_parts # Update memory if new folder tag found
+                    
+                    path_key = tuple(last_mod_parts)
                     
                     if path_key not in module_cache:
-                        target_path = await asyncio.to_thread(fb_get_or_create_nested_path, cat_id, batch_id, mod_parts)
+                        target_path = await asyncio.to_thread(fb_get_or_create_nested_path, cat_id, batch_id, last_mod_parts)
                         module_cache[path_key] = target_path
                     
                     target_path = module_cache[path_key]
@@ -332,8 +329,11 @@ async def process_bulk_auto(client, message, user_id):
                     payload = {"name": clean_name, "link": direct_link, "order": timestamp_base + scanned, "thumbnail": ""}
                     await asyncio.to_thread(fb_push_file, target_path, target_node, payload)
                     
-                    # Formatting folder name for printing in Telegram
-                    display_folder = " ❯ ".join(mod_parts)
+                    display_folder = " ❯ ".join(last_mod_parts)
+                    
+                    # Size formatting for UI
+                    size_bytes = get_file_size(msg)
+                    file_size_str = f"{size_bytes / (1024 * 1024):.2f} MB" if size_bytes > 0 else "Unknown Size"
                     
                 except Exception as ex:
                     failed_count += 1
@@ -345,37 +345,51 @@ async def process_bulk_auto(client, message, user_id):
                     bar = create_progress_bar(scanned, total_files)
                     
                     ui = (
-                        f"🖥️ [ 𝗦𝐘𝗦𝗧𝗘𝗠 𝗢𝗩𝗘𝗥𝗥𝗜𝗗𝗘 : 𝗚𝗛𝗢𝗦𝗧 𝗣𝗥𝗢𝗧𝗢𝗖𝗢𝗟 ] \n"
-                        f"▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n"
-                        f"🌐 Target Uplink  : `Bypassing Host Security... [200 OK]`\n"
-                        f"📂 Active Path    : `{display_folder}`\n\n"
-                        f"[»] 𝗘𝗫𝗧𝗥𝗔𝗖𝗧𝗜𝗡𝗚 𝗣𝗔𝗬𝗟𝗢𝗔𝗗 : `ID-#{msg.id}`\n"
-                        f"📄 `{clean_name[:35]}...`\n"
-                        f"⚡ Target Node    : `{target_node.capitalize()}`\n\n"
-                        f"📊 𝗖𝗟𝗢𝗡𝗜𝗡𝗚 𝗠𝗘𝗧𝗥𝗜𝗖𝗦 :\n"
-                        f"[{bar}] {perc}%\n"
-                        f"↳ 📦 Extracted : {scanned} / {total_files} Nodes\n\n"
-                        f"💎 𝗦𝗘𝗖𝗨𝗥𝗘𝗗 𝗜𝗡 𝗢𝗙𝗙𝗦𝗛𝗢𝗥𝗘 𝗩𝗔𝗨𝗟𝗧 : [{v_count + f_count}]\n"
-                        f" ├─ 🎬 Decrypted Videos (Lectures) : {v_count}\n"
-                        f" └─ 📑 Ripped Assets (Resources)   : {f_count}\n\n"
-                        f"⚠️ 𝗙𝗜𝗥𝗘𝗪𝗔𝗟𝗟 𝗕𝗟𝗢𝗖𝗞𝗦 / 𝗗𝗘𝗔𝗗 𝗟𝗜𝗡𝗞𝗦 : [{failed_count}]"
+                        f"🏴‍☠️ ⫸ 𝗣𝗥𝗘𝗠𝗜𝗨𝗠 𝗖𝗢𝗨𝗥𝗦𝗘 𝗛𝗘𝗜𝗦𝗧 𝗔𝗖𝗧𝗜𝗩𝗘 ⫷ 🏴‍☠️\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"⚡ **SYSTEM:** `ROOT OVERRIDE ENGAGED`\n\n"
+                        f"🔗 **Target Host:** `[ PAYWALL BYPASSED & DRM CRACKED ]`\n"
+                        f"🛡️ **Proxy Route:** `[🇷🇺 RU] ➔ [🇵🇦 PA] ➔ [🇨🇭 CH] (Untraceable)`\n"
+                        f"📡 **Destination:** `skillneast.vercel.com` (Encrypted Vault)\n"
+                        f"📂 **Ripping Course:** `{display_folder}`\n\n"
+                        f"⬇️ 𝗟𝗘𝗘𝗖𝗛𝗜𝗡𝗚 𝗣𝗥𝗘𝗠𝗜𝗨𝗠 𝗔𝗦𝗦𝗘𝗧 ⬇️\n"
+                        f"🆔 **Node Hash:** `[msg_{msg.id}]`\n"
+                        f"📄 **Payload:** `{clean_name[:40]}`\n"
+                        f"💾 **Size:** `{file_size_str}` | 🚀 **Speed:** `142.5 MB/s`\n"
+                        f"🔑 **Decryption:** `RSA-4096 Key Extracted [OK]`\n"
+                        f"⚙️ **Action:** `Stripping Metadata & Injecting to DB...`\n\n"
+                        f"📊 𝗛𝗘𝗜𝗦𝗧 𝗢𝗩𝗘𝗥𝗩𝗜𝗘𝗪:\n"
+                        f"► {scanned} out of {total_files} Nodes Pirated. ({perc}%)\n"
+                        f"[{bar}] `{scanned} / {total_files} Drained`\n\n"
+                        f"🗄️ 𝗦𝗧𝗢𝗟𝗘𝗡 𝗗𝗔𝗧𝗔𝗕𝗔𝗦𝗘 𝗜𝗡𝗩𝗘𝗡𝗧𝗢𝗥𝗬:\n"
+                        f" » 🗂️ **Total Files Found:** {total_files}\n"
+                        f" » 🎬 **Video Leaks (Lectures) :** {v_count}\n"
+                        f" » 📚 **Raw Assets (Resources) :** {f_count}\n"
+                        f" » ⛔ **Security Blocks (Fails):** {failed_count}\n\n"
+                        f"📟 𝗟𝗜𝗩𝗘 𝗧𝗘𝗥𝗠𝗜𝗡𝗔𝗟 𝗟𝗢𝗚𝗦:\n"
+                        f"`[+] Injecting payload to bypass Cloudflare... OK`\n"
+                        f"`[+] Establishing secure handshake with database... OK`\n"
+                        f"`[!] Warning: Host ping detected. Masking signature...`\n\n"
+                        f"🕵️‍♂️ *Ghost sync active. Tunneling data seamlessly...*\n\n"
+                        f"@skillneast1"
                     )
-                    if failed_logs: ui += f"\n └─ 🚫 `{failed_logs[-1]}`"
-                    
                     try: await status_msg.edit_text(ui); last_update_time = now
                     except: pass
                     
         final_ui = (
-            f"🖥️ [ 𝗦𝐘𝗦𝗧𝗘𝗠 𝗢𝗩𝗘𝗥𝗥𝗜𝗗𝗘 : 𝗖𝗢𝗠𝗣𝗟𝗘𝗧𝗘 ]\n"
-            f"▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n"
-            f"🌐 Mission Status : `All Payloads Successfully Pirated [200 OK]`\n"
+            f"🏴‍☠️ ⫸ 𝗦𝗬𝗦𝗧𝗘𝗠 𝗢𝗩𝗘𝗥𝗥𝗜𝗗𝗘 : 𝗖𝗢𝗠𝗣𝗟𝗘𝗧𝗘 ⫷ 🏴‍☠️\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🌐 **Mission Status:** `All Payloads Successfully Pirated [200 OK]`\n\n"
             f"📊 𝗙𝗜𝗡𝗔𝗟 𝗛𝗘𝗜𝗦𝗧 𝗠𝗘𝗧𝗥𝗜𝗖𝗦 :\n"
             f"↳ 📦 Total Scanned : {total_files} Nodes\n"
-            f"↳ 📁 Auto-Created Nested Folders : {len(module_cache)}\n\n"
-            f"💎 𝗦𝗘𝗖𝗨𝗥𝗘𝗗 𝗜𝗡 𝗢𝗙𝗙𝗦𝗛𝗢𝗥𝗘 𝗩𝗔𝗨𝗟𝗧 : [{v_count + f_count}]\n"
-            f" ├─ 🎬 Decrypted Videos (Lectures) : {v_count}\n"
-            f" └─ 📑 Ripped Assets (Resources)   : {f_count}\n\n"
-            f"⚠️ 𝗙𝗜𝗥𝗘𝗪𝗔𝗟𝗟 𝗕𝗟𝗢𝗖𝗞𝗦 / 𝗦𝗞𝗜𝗣𝗣𝗘𝗗 : [{failed_count}]"
+            f"↳ 📁 Auto-Created Folders : {len(module_cache)}\n\n"
+            f"🗄️ 𝗦𝗧𝗢𝗟𝗘𝗡 𝗗𝗔𝗧𝗔𝗕𝗔𝗦𝗘 𝗜𝗡𝗩𝗘𝗡𝗧𝗢𝗥𝗬:\n"
+            f" » 🗂️ **Total Files Processed:** {total_files}\n"
+            f" » 🎬 **Video Leaks (Lectures) :** {v_count}\n"
+            f" » 📚 **Raw Assets (Resources) :** {f_count}\n"
+            f" » ⛔ **Security Blocks (Fails):** {failed_count}\n\n"
+            f"✅ **ALL SECURED IN OFFSHORE VAULT**\n\n"
+            f"@skillneast1"
         )
         await status_msg.edit_text(final_ui)
         
@@ -424,23 +438,55 @@ async def process_bulk_manual(client, message, user_id):
                     
                     payload = {"name": clean_name, "link": direct_link, "order": timestamp_base + scanned, "thumbnail": ""}
                     await asyncio.to_thread(fb_push_file, target_path, target_node, payload)
+                    
+                    size_bytes = get_file_size(msg)
+                    file_size_str = f"{size_bytes / (1024 * 1024):.2f} MB" if size_bytes > 0 else "Unknown Size"
+                    
                 except: failed_count += 1
 
                 now = time.time()
                 if now - last_update_time > 2.5:
                     perc = round((scanned / total_files) * 100, 1) if total_files > 0 else 0
                     bar = create_progress_bar(scanned, total_files)
+                    
                     ui = (
-                        f"🖥️ [ 𝗦𝐘𝗦𝗧𝗘𝗠 𝗢𝗩𝗘𝗥𝗥𝗜𝗗𝗘 : 𝗠𝗔𝗡𝗨𝗔𝗟 ]\n"
-                        f"▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓\n\n"
-                        f"[»] 𝗘𝗫𝗧𝗥𝗔𝗖𝗧𝗜𝗡𝗚 : `ID-#{msg.id}`\n"
-                        f"[{bar}] {perc}%\n\n"
-                        f"💎 Secured: {v_count + f_count} (🎬 {v_count} | 📑 {f_count})\n"
-                        f"⚠️ Errors : {failed_count}"
+                        f"🏴‍☠️ ⫸ 𝗣𝗥𝗘𝗠𝗜𝗨𝗠 𝗖𝗢𝗨𝗥𝗦𝗘 𝗛𝗘𝗜𝗦𝗧 𝗔𝗖𝗧𝗜𝗩𝗘 ⫷ 🏴‍☠️\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"⚡ **SYSTEM:** `ROOT OVERRIDE (MANUAL MODE)`\n\n"
+                        f"🔗 **Target Host:** `[ PAYWALL BYPASSED & DRM CRACKED ]`\n"
+                        f"🛡️ **Proxy Route:** `[🇷🇺 RU] ➔ [🇵🇦 PA] ➔ [🇨🇭 CH]`\n"
+                        f"📂 **Ripping Course:** `Manual Selected Folder`\n\n"
+                        f"⬇️ 𝗟𝗘𝗘𝗖𝗛𝗜𝗡𝗚 𝗣𝗥𝗘𝗠𝗜𝗨𝗠 𝗔𝗦𝗦𝗘𝗧 ⬇️\n"
+                        f"🆔 **Node Hash:** `[msg_{msg.id}]`\n"
+                        f"💾 **Size:** `{file_size_str}` | 🚀 **Speed:** `142.5 MB/s`\n"
+                        f"⚙️ **Action:** `Stripping Metadata & Injecting to DB...`\n\n"
+                        f"📊 𝗛𝗘𝗜𝗦𝗧 𝗢𝗩𝗘𝗥𝗩𝗜𝗘𝗪:\n"
+                        f"► {scanned} out of {total_files} Nodes Pirated. ({perc}%)\n"
+                        f"[{bar}] `{scanned} / {total_files} Drained`\n\n"
+                        f"🗄️ 𝗦𝗧𝗢𝗟𝗘𝗡 𝗗𝗔𝗧𝗔𝗕𝗔𝗦𝗘 𝗜𝗡𝗩𝗘𝗡𝗧𝗢𝗥𝗬:\n"
+                        f" » 🗂️ **Total Files Found:** {total_files}\n"
+                        f" » 🎬 **Video Leaks (Lectures) :** {v_count}\n"
+                        f" » 📚 **Raw Assets (Resources) :** {f_count}\n"
+                        f" » ⛔ **Security Blocks (Fails):** {failed_count}\n\n"
+                        f"@skillneast1"
                     )
                     try: await status_msg.edit_text(ui); last_update_time = now
                     except: pass
                     
-        await status_msg.edit_text(f"✅ **MANUAL HEIST COMPLETE!**\n🎬 Videos: {v_count} | 📑 Files: {f_count} | ❌ Errors: {failed_count}")
+        final_ui = (
+            f"🏴‍☠️ ⫸ 𝗦𝗬𝗦𝗧𝗘𝗠 𝗢𝗩𝗘𝗥𝗥𝗜𝗗𝗘 : 𝗖𝗢𝗠𝗣𝗟𝗘𝗧𝗘 ⫷ 🏴‍☠️\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🌐 **Mission Status:** `Manual Batch Successfully Pirated [200 OK]`\n\n"
+            f"📊 𝗙𝗜𝗡𝗔𝗟 𝗛𝗘𝗜𝗦𝗧 𝗠𝗘𝗧𝗥𝗜𝗖𝗦 :\n"
+            f"↳ 📦 Total Scanned : {total_files} Nodes\n\n"
+            f"🗄️ 𝗦𝗧𝗢𝗟𝗘𝗡 𝗗𝗔𝗧𝗔𝗕𝗔𝗦𝗘 𝗜𝗡𝗩𝗘𝗡𝗧𝗢𝗥𝗬:\n"
+            f" » 🗂️ **Total Files Processed:** {total_files}\n"
+            f" » 🎬 **Video Leaks (Lectures) :** {v_count}\n"
+            f" » 📚 **Raw Assets (Resources) :** {f_count}\n"
+            f" » ⛔ **Security Blocks (Fails):** {failed_count}\n\n"
+            f"✅ **ALL SECURED IN OFFSHORE VAULT**\n\n"
+            f"@skillneast1"
+        )
+        await status_msg.edit_text(final_ui)
     except Exception as e: await status_msg.edit_text(f"❌ Error: {e}")
     finally: user_session[user_id] = {"state": "idle"}
