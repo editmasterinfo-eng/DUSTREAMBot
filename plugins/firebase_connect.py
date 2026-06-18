@@ -55,15 +55,14 @@ def get_file_size(message):
 def get_stream_url(msg):
     file_name = get_file_name_robust(msg)
     clean_name = file_name.replace("_", " ").replace("-", " ")
-    safe_filename = urllib.parse.quote(file_name)
     base_url = STREAM_URL.rstrip('/')
-    direct_link = f"{base_url}/dl/{msg.id}/{safe_filename}"
+    direct_link = f"{base_url}/watch/{msg.id}"
     return direct_link, clean_name
 
-def extract_module_path(caption):
-    """🔥 NEW: Returns None if no tag, so the bot remembers the previous folder"""
-    if not caption: return None
-    match = re.search(r'/folder\s+([^\n]+)', caption)
+def extract_module_path(text):
+    """🔥 Extract full hierarchy path from caption or text"""
+    if not text: return None
+    match = re.search(r'/folder\s+([^\n]+)', text)
     if match:
         path = match.group(1).strip()
         parts = [p.strip() for p in path.split('/') if p.strip()]
@@ -112,7 +111,7 @@ state_filter = filters.create(check_state)
 file_filter = filters.create(check_files)
 
 # ==========================================
-# 🤖 4. COMMANDS & MENUS (GROUP=-1)
+# 🤖 4. COMMANDS & MENUS
 # ==========================================
 @Client.on_message(filters.command("new") & filters.private & filters.user(ADMINS), group=-1)
 async def new_cmd(client, message: Message):
@@ -239,10 +238,17 @@ async def handle_names(client, message: Message):
 async def handle_files(client, message: Message):
     user_id = message.from_user.id
     state = user_session[user_id]["state"]
-    msg_id = message.forward_from_message_id if message.forward_from_message_id else message.id
+    
+    # 🔥 FIX 1: Getting correct SOURCE CHANNEL dynamically
+    if message.forward_from_chat:
+        source_chat = message.forward_from_chat.id
+        msg_id = message.forward_from_message_id
+    else:
+        source_chat = SOURCE_CHANNEL
+        msg_id = message.id
 
     if state == "waiting_first_file_auto":
-        user_session[user_id].update({"start_id": msg_id, "state": "waiting_last_file_auto"})
+        user_session[user_id].update({"start_id": msg_id, "source_chat": source_chat, "state": "waiting_last_file_auto"})
         await message.reply_text(f"🎯 **First Payload Locked (ID: {msg_id})**\n\n📤 Now **FORWARD** the LAST FILE.")
         
     elif state == "waiting_last_file_auto":
@@ -251,7 +257,7 @@ async def handle_files(client, message: Message):
         asyncio.create_task(process_bulk_auto(client, message, user_id))
 
     elif state == "waiting_first_file_manual":
-        user_session[user_id].update({"start_id": msg_id, "state": "waiting_last_file_manual"})
+        user_session[user_id].update({"start_id": msg_id, "source_chat": source_chat, "state": "waiting_last_file_manual"})
         await message.reply_text(f"🎯 **First Payload Locked (ID: {msg_id})**\n\n📤 Now **FORWARD** the LAST FILE.")
         
     elif state == "waiting_last_file_manual":
@@ -267,23 +273,23 @@ async def handle_files(client, message: Message):
 async def process_bulk_auto(client, message, user_id):
     start_id = user_session[user_id]["start_id"]
     end_id = user_session[user_id]["end_id"]
-    source_chat = SOURCE_CHANNEL
+    source_chat = user_session[user_id].get("source_chat", SOURCE_CHANNEL)
     
     if start_id > end_id: start_id, end_id = end_id, start_id
-    total_files = (end_id - start_id) + 1
+    total_ids = (end_id - start_id) + 1
         
     status_msg = await message.reply_text("🔄 **Establishing Target Uplink...**")
     cat_id, batch_id = user_session[user_id]["cat_id"], user_session[user_id]["batch_id"]
     
     module_cache = {}
     v_count = f_count = failed_count = scanned = 0
+    empty_count = text_count = 0  # 🔥 FIX 2: Tracking skipped IDs
+    
     failed_logs = []
     timestamp_base = int(time.time() * 1000)
     last_update_time = time.time()
     
-    # 🔥 SMART MEMORY: Keeps track of the last seen folder path
     last_mod_parts = ["Main Module"]
-    
     video_exts = ['.mp4', '.mkv', '.avi', '.webm', '.mov', '.flv', '.wmv', '.m4v']
     all_ids = list(range(start_id, end_id + 1))
     
@@ -299,16 +305,25 @@ async def process_bulk_auto(client, message, user_id):
                 
             for msg in messages:
                 scanned += 1
-                if msg.empty or not getattr(msg, "media", None): continue
+                
+                # Check for deleted/empty messages in channel gap
+                if msg.empty: 
+                    empty_count += 1
+                    continue
+                
+                # Extract folder tag from EITHER caption or pure text message
+                text_content = msg.caption if getattr(msg, "media", None) else msg.text
+                new_mod_parts = extract_module_path(text_content)
+                if new_mod_parts:
+                    last_mod_parts = new_mod_parts
+                
+                # If message has no media (it's just text), we skip uploading it as a file
+                if not getattr(msg, "media", None):
+                    text_count += 1
+                    continue
                 
                 try:
                     direct_link, clean_name = get_stream_url(msg)
-                    
-                    # 🔥 SMART HIERARCHY LOGIC 
-                    new_mod_parts = extract_module_path(msg.caption)
-                    if new_mod_parts:
-                        last_mod_parts = new_mod_parts # Update memory if new folder tag found
-                    
                     path_key = tuple(last_mod_parts)
                     
                     if path_key not in module_cache:
@@ -330,8 +345,6 @@ async def process_bulk_auto(client, message, user_id):
                     await asyncio.to_thread(fb_push_file, target_path, target_node, payload)
                     
                     display_folder = " ❯ ".join(last_mod_parts)
-                    
-                    # Size formatting for UI
                     size_bytes = get_file_size(msg)
                     file_size_str = f"{size_bytes / (1024 * 1024):.2f} MB" if size_bytes > 0 else "Unknown Size"
                     
@@ -341,8 +354,8 @@ async def process_bulk_auto(client, message, user_id):
 
                 now = time.time()
                 if now - last_update_time > 2.5:
-                    perc = round((scanned / total_files) * 100, 1) if total_files > 0 else 0
-                    bar = create_progress_bar(scanned, total_files)
+                    perc = round((scanned / total_ids) * 100, 1) if total_ids > 0 else 0
+                    bar = create_progress_bar(scanned, total_ids)
                     
                     ui = (
                         f"🏴‍☠️ ⫸ 𝗣𝗥𝗘𝗠𝗜𝗨𝗠 𝗖𝗢𝗨𝗥𝗦𝗘 𝗛𝗘𝗜𝗦𝗧 𝗔𝗖𝗧𝗜𝗩𝗘 ⫷ 🏴‍☠️\n"
@@ -359,18 +372,14 @@ async def process_bulk_auto(client, message, user_id):
                         f"🔑 **Decryption:** `RSA-4096 Key Extracted [OK]`\n"
                         f"⚙️ **Action:** `Stripping Metadata & Injecting to DB...`\n\n"
                         f"📊 𝗛𝗘𝗜𝗦𝗧 𝗢𝗩𝗘𝗥𝗩𝗜𝗘𝗪:\n"
-                        f"► {scanned} out of {total_files} Nodes Pirated. ({perc}%)\n"
-                        f"[{bar}] `{scanned} / {total_files} Drained`\n\n"
+                        f"► {scanned} out of {total_ids} IDs Scanned. ({perc}%)\n"
+                        f"[{bar}] `{scanned} / {total_ids} Processed`\n\n"
                         f"🗄️ 𝗦𝗧𝗢𝗟𝗘𝗡 𝗗𝗔𝗧𝗔𝗕𝗔𝗦𝗘 𝗜𝗡𝗩𝗘𝗡𝗧𝗢𝗥𝗬:\n"
-                        f" » 🗂️ **Total Files Found:** {total_files}\n"
+                        f" » 🗂️ **Total IDs Scanned:** {total_ids}\n"
                         f" » 🎬 **Video Leaks (Lectures) :** {v_count}\n"
                         f" » 📚 **Raw Assets (Resources) :** {f_count}\n"
+                        f" » 👻 **Empty/Text Skipped:** {empty_count + text_count}\n"
                         f" » ⛔ **Security Blocks (Fails):** {failed_count}\n\n"
-                        f"📟 𝗟𝗜𝗩𝗘 𝗧𝗘𝗥𝗠𝗜𝗡𝗔𝗟 𝗟𝗢𝗚𝗦:\n"
-                        f"`[+] Injecting payload to bypass Cloudflare... OK`\n"
-                        f"`[+] Establishing secure handshake with database... OK`\n"
-                        f"`[!] Warning: Host ping detected. Masking signature...`\n\n"
-                        f"🕵️‍♂️ *Ghost sync active. Tunneling data seamlessly...*\n\n"
                         f"@skillneast1"
                     )
                     try: await status_msg.edit_text(ui); last_update_time = now
@@ -381,12 +390,13 @@ async def process_bulk_auto(client, message, user_id):
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"🌐 **Mission Status:** `All Payloads Successfully Pirated [200 OK]`\n\n"
             f"📊 𝗙𝗜𝗡𝗔𝗟 𝗛𝗘𝗜𝗦𝗧 𝗠𝗘𝗧𝗥𝗜𝗖𝗦 :\n"
-            f"↳ 📦 Total Scanned : {total_files} Nodes\n"
+            f"↳ 📦 Total Scanned : {total_ids} IDs\n"
             f"↳ 📁 Auto-Created Folders : {len(module_cache)}\n\n"
             f"🗄️ 𝗦𝗧𝗢𝗟𝗘𝗡 𝗗𝗔𝗧𝗔𝗕𝗔𝗦𝗘 𝗜𝗡𝗩𝗘𝗡𝗧𝗢𝗥𝗬:\n"
-            f" » 🗂️ **Total Files Processed:** {total_files}\n"
+            f" » 🗂️ **Total IDs Scanned:** {total_ids}\n"
             f" » 🎬 **Video Leaks (Lectures) :** {v_count}\n"
             f" » 📚 **Raw Assets (Resources) :** {f_count}\n"
+            f" » 👻 **Empty/Text Skipped:** {empty_count + text_count}\n"
             f" » ⛔ **Security Blocks (Fails):** {failed_count}\n\n"
             f"✅ **ALL SECURED IN OFFSHORE VAULT**\n\n"
             f"@skillneast1"
@@ -401,14 +411,16 @@ async def process_bulk_auto(client, message, user_id):
 # ==========================================
 async def process_bulk_manual(client, message, user_id):
     start_id, end_id = user_session[user_id]["start_id"], user_session[user_id]["end_id"]
-    source_chat = SOURCE_CHANNEL
+    source_chat = user_session[user_id].get("source_chat", SOURCE_CHANNEL)
+    
     if start_id > end_id: start_id, end_id = end_id, start_id
-    total_files = (end_id - start_id) + 1
+    total_ids = (end_id - start_id) + 1
     
     status_msg = await message.reply_text("🔄 **Initializing System Override...**")
     target_path = user_session[user_id]["target_path"]
     
     v_count = f_count = failed_count = scanned = 0
+    empty_count = text_count = 0
     timestamp_base = int(time.time() * 1000)
     last_update_time = time.time()
     
@@ -423,7 +435,12 @@ async def process_bulk_manual(client, message, user_id):
                 
             for msg in messages:
                 scanned += 1
-                if msg.empty or not getattr(msg, "media", None): continue
+                if msg.empty:
+                    empty_count += 1
+                    continue
+                if not getattr(msg, "media", None):
+                    text_count += 1
+                    continue
                 
                 try:
                     direct_link, clean_name = get_stream_url(msg)
@@ -446,8 +463,8 @@ async def process_bulk_manual(client, message, user_id):
 
                 now = time.time()
                 if now - last_update_time > 2.5:
-                    perc = round((scanned / total_files) * 100, 1) if total_files > 0 else 0
-                    bar = create_progress_bar(scanned, total_files)
+                    perc = round((scanned / total_ids) * 100, 1) if total_ids > 0 else 0
+                    bar = create_progress_bar(scanned, total_ids)
                     
                     ui = (
                         f"🏴‍☠️ ⫸ 𝗣𝗥𝗘𝗠𝗜𝗨𝗠 𝗖𝗢𝗨𝗥𝗦𝗘 𝗛𝗘𝗜𝗦𝗧 𝗔𝗖𝗧𝗜𝗩𝗘 ⫷ 🏴‍☠️\n"
@@ -461,12 +478,13 @@ async def process_bulk_manual(client, message, user_id):
                         f"💾 **Size:** `{file_size_str}` | 🚀 **Speed:** `142.5 MB/s`\n"
                         f"⚙️ **Action:** `Stripping Metadata & Injecting to DB...`\n\n"
                         f"📊 𝗛𝗘𝗜𝗦𝗧 𝗢𝗩𝗘𝗥𝗩𝗜𝗘𝗪:\n"
-                        f"► {scanned} out of {total_files} Nodes Pirated. ({perc}%)\n"
-                        f"[{bar}] `{scanned} / {total_files} Drained`\n\n"
+                        f"► {scanned} out of {total_ids} IDs Scanned. ({perc}%)\n"
+                        f"[{bar}] `{scanned} / {total_ids} Drained`\n\n"
                         f"🗄️ 𝗦𝗧𝗢𝗟𝗘𝗡 𝗗𝗔𝗧𝗔𝗕𝗔𝗦𝗘 𝗜𝗡𝗩𝗘𝗡𝗧𝗢𝗥𝗬:\n"
-                        f" » 🗂️ **Total Files Found:** {total_files}\n"
+                        f" » 🗂️ **Total IDs Scanned:** {total_ids}\n"
                         f" » 🎬 **Video Leaks (Lectures) :** {v_count}\n"
                         f" » 📚 **Raw Assets (Resources) :** {f_count}\n"
+                        f" » 👻 **Empty/Text Skipped:** {empty_count + text_count}\n"
                         f" » ⛔ **Security Blocks (Fails):** {failed_count}\n\n"
                         f"@skillneast1"
                     )
@@ -478,11 +496,12 @@ async def process_bulk_manual(client, message, user_id):
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"🌐 **Mission Status:** `Manual Batch Successfully Pirated [200 OK]`\n\n"
             f"📊 𝗙𝗜𝗡𝗔𝗟 𝗛𝗘𝗜𝗦𝗧 𝗠𝗘𝗧𝗥𝗜𝗖𝗦 :\n"
-            f"↳ 📦 Total Scanned : {total_files} Nodes\n\n"
+            f"↳ 📦 Total Scanned : {total_ids} IDs\n\n"
             f"🗄️ 𝗦𝗧𝗢𝗟𝗘𝗡 𝗗𝗔𝗧𝗔𝗕𝗔𝗦𝗘 𝗜𝗡𝗩𝗘𝗡𝗧𝗢𝗥𝗬:\n"
-            f" » 🗂️ **Total Files Processed:** {total_files}\n"
+            f" » 🗂️ **Total IDs Scanned:** {total_ids}\n"
             f" » 🎬 **Video Leaks (Lectures) :** {v_count}\n"
             f" » 📚 **Raw Assets (Resources) :** {f_count}\n"
+            f" » 👻 **Empty/Text Skipped:** {empty_count + text_count}\n"
             f" » ⛔ **Security Blocks (Fails):** {failed_count}\n\n"
             f"✅ **ALL SECURED IN OFFSHORE VAULT**\n\n"
             f"@skillneast1"
