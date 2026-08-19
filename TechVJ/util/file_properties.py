@@ -16,12 +16,20 @@ async def parse_file_unique_id(message: "Messages") -> Optional[str]:
     if media:
         return media.file_unique_id
 
-async def get_file_ids(message):
-    if message.empty:
-        raise FIleNotFound
+async def get_file_ids(message) -> Optional[FileId]:
+    # If the message is empty or missing, return None gracefully
+    if not message or getattr(message, "empty", False):
+        return None
+
     media = get_media_from_message(message)
-    file_unique_id = await parse_file_unique_id(message)
+    if not media:
+        return None
+
     file_id = await parse_file_id(message)
+    if file_id is None:
+        return None
+
+    file_unique_id = await parse_file_unique_id(message)
     setattr(file_id, "file_size", getattr(media, "file_size", 0))
     setattr(file_id, "mime_type", getattr(media, "mime_type", ""))
     setattr(file_id, "file_name", getattr(media, "file_name", ""))
