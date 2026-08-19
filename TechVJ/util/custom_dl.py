@@ -51,18 +51,32 @@ class ByteStreamer:
         Generates the properties of a media file on a specific message.
         returns ths properties in a FIleId class.
         """
-        file = await self.client.get_messages(LOG_CHANNEL, int(id))
-        file_id = await get_file_ids(file)
+        file_id = None
 
-        if not file_id:
-            file = await self.client.get_messages(FALLBACK_CHANNEL, int(id))
+        # 1. Attempt lookup in primary LOG_CHANNEL
+        try:
+            file = await self.client.get_messages(LOG_CHANNEL, int(id))
             file_id = await get_file_ids(file)
+            if file_id:
+                logging.debug(f"Successfully found file for message ID {id} in LOG_CHANNEL ({LOG_CHANNEL})")
+        except Exception as e:
+            logging.debug(f"Failed to fetch message ID {id} from LOG_CHANNEL: {e}")
 
+        # 2. If not found in LOG_CHANNEL, attempt lookup in FALLBACK_CHANNEL
+        if not file_id:
+            try:
+                file = await self.client.get_messages(FALLBACK_CHANNEL, int(id))
+                file_id = await get_file_ids(file)
+                if file_id:
+                    logging.debug(f"Successfully found file for message ID {id} in FALLBACK_CHANNEL ({FALLBACK_CHANNEL})")
+            except Exception as e:
+                logging.debug(f"Failed to fetch message ID {id} from FALLBACK_CHANNEL: {e}")
+
+        # 3. If neither channel produced a valid FileId, raise FIleNotFound (404)
         if not file_id:
             logging.debug(f"Message with ID {id} not found in LOG_CHANNEL or FALLBACK_CHANNEL")
             raise FIleNotFound
 
-        logging.debug(f"Generated file ID and Unique ID for message with ID {id}")
         self.cached_file_ids[id] = file_id
         logging.debug(f"Cached media message with ID {id}")
         return self.cached_file_ids[id]
