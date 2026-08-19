@@ -11,6 +11,8 @@ from pyrogram.errors import AuthBytesInvalid
 from TechVJ.server.exceptions import FIleNotFound
 from pyrogram.file_id import FileId, FileType, ThumbnailSource
 
+FALLBACK_CHANNEL = -1003897025049
+
 
 class ByteStreamer:
     def __init__(self, client: Client):
@@ -50,11 +52,17 @@ class ByteStreamer:
         returns ths properties in a FIleId class.
         """
         file = await self.client.get_messages(LOG_CHANNEL, int(id))
-        file_id = await get_file_ids(file) 
-        logging.debug(f"Generated file ID and Unique ID for message with ID {id}")
+        file_id = await get_file_ids(file)
+
         if not file_id:
-            logging.debug(f"Message with ID {id} not found")
+            file = await self.client.get_messages(FALLBACK_CHANNEL, int(id))
+            file_id = await get_file_ids(file)
+
+        if not file_id:
+            logging.debug(f"Message with ID {id} not found in LOG_CHANNEL or FALLBACK_CHANNEL")
             raise FIleNotFound
+
+        logging.debug(f"Generated file ID and Unique ID for message with ID {id}")
         self.cached_file_ids[id] = file_id
         logging.debug(f"Cached media message with ID {id}")
         return self.cached_file_ids[id]
